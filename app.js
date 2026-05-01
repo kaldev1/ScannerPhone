@@ -40,8 +40,8 @@ const els = {
 };
 
 const MAX_OUTPUT_EDGE = 2200;
-const GUIDE_DETECT_INTERVAL = 120;
-const GUIDE_SAMPLE_EDGE = 480;
+const GUIDE_DETECT_INTERVAL = 150;
+const GUIDE_SAMPLE_EDGE = 620;
 const CAPTURE_SAMPLE_EDGE = 620;
 
 init();
@@ -343,11 +343,20 @@ async function captureFromCamera() {
     setStatus("Capturing sharp frame...");
     const source = await captureSharpFrame();
     await addImageCanvas(source);
+    resetDocumentGuideDetection();
     setStatus("Scan added.");
   } finally {
     els.snapButton.disabled = false;
     els.dockSnapButton.disabled = false;
   }
+}
+
+function resetDocumentGuideDetection() {
+  state.guideQuad = null;
+  state.guideLastRun = 0;
+  state.guideLastSeen = 0;
+  const ctx = els.documentGuide.getContext("2d");
+  ctx.clearRect(0, 0, els.documentGuide.width, els.documentGuide.height);
 }
 
 async function captureSharpFrame() {
@@ -1139,6 +1148,11 @@ function drawPreview(canvas) {
   els.canvas.width = canvas.width;
   els.canvas.height = canvas.height;
   els.canvas.getContext("2d").drawImage(canvas, 0, 0);
+  if (state.stream) {
+    els.canvas.hidden = true;
+    els.empty.hidden = true;
+    return;
+  }
   els.canvas.hidden = false;
   els.empty.hidden = true;
 }
@@ -1147,6 +1161,11 @@ function drawImageToPreview(image) {
   els.canvas.width = image.naturalWidth;
   els.canvas.height = image.naturalHeight;
   els.canvas.getContext("2d").drawImage(image, 0, 0);
+  if (state.stream) {
+    els.canvas.hidden = true;
+    els.empty.hidden = true;
+    return;
+  }
   els.canvas.hidden = false;
   els.empty.hidden = true;
 }
