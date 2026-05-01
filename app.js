@@ -40,9 +40,9 @@ const els = {
 };
 
 const MAX_OUTPUT_EDGE = 2200;
-const GUIDE_DETECT_INTERVAL = 150;
-const GUIDE_SAMPLE_EDGE = 620;
-const CAPTURE_SAMPLE_EDGE = 620;
+const GUIDE_DETECT_INTERVAL = 260;
+const GUIDE_SAMPLE_EDGE = 760;
+const CAPTURE_SAMPLE_EDGE = 900;
 
 init();
 
@@ -543,9 +543,20 @@ function detectDocumentQuad(canvas, sampleEdge = CAPTURE_SAMPLE_EDGE) {
 
   const mean = total / luminance.length;
   const borderMean = estimateBorderMean(luminance, width, height);
-  const mask = createDocumentMask(luminance, width, height, mean, borderMean);
-  closeMask(mask, width, height, 3);
-  const component = findBestDocumentComponent(mask, width, height);
+  const masks = [
+    createDocumentMask(luminance, width, height, mean, borderMean),
+    createAdaptiveDocumentMask(luminance, width, height, mean, borderMean)
+  ];
+  let component = null;
+
+  for (const mask of masks) {
+    closeMask(mask, width, height, 3);
+    const candidate = findBestDocumentComponent(mask, width, height);
+    if (!component || (candidate?.score || 0) > component.score) {
+      component = candidate;
+    }
+  }
+
   if (!component?.corners) {
     return detectFallbackQuad(luminance, width, height, scale);
   }
@@ -595,6 +606,47 @@ function createDocumentMask(luminance, width, height, mean, borderMean) {
   }
 
   return mask;
+}
+
+function createAdaptiveDocumentMask(luminance, width, height, mean, borderMean) {
+  const mask = new Uint8Array(width * height);
+  const radius = Math.max(10, Math.round(Math.min(width, height) * 0.045));
+
+  for (let y = 1; y < height - 1; y++) {
+    const top = Math.max(0, y - radius);
+    const bottom = Math.min(height - 1, y + radius);
+    for (let x = 1; x < width - 1; x++) {
+      const left = Math.max(0, x - radius);
+      const right = Math.min(width - 1, x + radius);
+      const index = y * width + x;
+      const local = localMean(luminance, width, left, top, right, bottom);
+      const edge =
+        Math.abs(luminance[index + 1] - luminance[index - 1]) +
+        Math.abs(luminance[index + width] - luminance[index - width]);
+      const brighterThanLocal = luminance[index] > local + 10 && luminance[index] > borderMean + 10;
+      const paperTone = luminance[index] > Math.max(138, mean - 8) && edge < 76;
+
+      if (brighterThanLocal || paperTone) {
+        mask[index] = 1;
+      }
+    }
+  }
+
+  return mask;
+}
+
+function localMean(luminance, width, left, top, right, bottom) {
+  let total = 0;
+  let count = 0;
+
+  for (let y = top; y <= bottom; y += 4) {
+    for (let x = left; x <= right; x += 4) {
+      total += luminance[y * width + x];
+      count++;
+    }
+  }
+
+  return total / count;
 }
 
 function warpDocument(source, quad) {
@@ -932,6 +984,7 @@ function applyScanFilter(ctx, width, height, mode) {
   const contrast = mode === "document" ? 1.22 : mode === "color" ? 1.12 : 1.12;
   const brightness = mode === "document" ? 7 : mode === "color" ? 4 : 2;
   const levels = grayscale ? getGrayLevels(data) : null;
+  const illumination = mode === "document" ? estimateIllumination(data, width, height) : null;
 
   for (let i = 0; i < data.length; i += 4) {
     let r = data[i];
@@ -940,8 +993,10 @@ function applyScanFilter(ctx, width, height, mode) {
 
     if (grayscale) {
       const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-      const normalized = normalizeLevel(gray, levels.black, levels.white);
-      const leveled = mode === "document" ? gray * 0.32 + normalized * 0.68 : gray * 0.55 + normalized * 0.45;
+      const bg = illumination ? illumination[Math.floor(i / 4)] : 220;
+      const corrected = mode === "document" ? clamp(gray + (222 - bg) * 0.72) : gray;
+      const normalized = normalizeLevel(corrected, levels.black, levels.white);
+      const leveled = mode === "document" ? corrected * 0.38 + normalized * 0.62 : gray * 0.55 + normalized * 0.45;
       r = leveled;
       g = leveled;
       b = leveled;
@@ -953,8 +1008,8 @@ function applyScanFilter(ctx, width, height, mode) {
 
     if (mode === "document") {
       const v = data[i];
-      const paperLift = v > 174 ? Math.min(248, v + (248 - v) * 0.55) : v;
-      const inkWeight = paperLift < 92 ? Math.max(18, paperLift * 0.78) : paperLift;
+      const paperLift = v > 168 ? Math.min(246, v + (246 - v) * 0.48) : v;
+      const inkWeight = paperLift < 98 ? Math.max(20, paperLift * 0.76) : paperLift;
       const scanned = clamp(inkWeight);
       data[i] = scanned;
       data[i + 1] = scanned;
@@ -963,6 +1018,60 @@ function applyScanFilter(ctx, width, height, mode) {
   }
 
   ctx.putImageData(imageData, 0, 0);
+}
+
+function estimateIllumination(data, width, height) {
+  const sampleStep = Math.max(12, Math.round(Math.min(width, height) / 36));
+  const gridWidth = Math.ceil(width / sampleStep);
+  const gridHeight = Math.ceil(height / sampleStep);
+  const grid = new Float32Array(gridWidth * gridHeight);
+
+  for (let gy = 0; gy < gridHeight; gy++) {
+    for (let gx = 0; gx < gridWidth; gx++) {
+      let total = 0;
+      let count = 0;
+      const startX = gx * sampleStep;
+      const startY = gy * sampleStep;
+      const endX = Math.min(width, startX + sampleStep);
+      const endY = Math.min(height, startY + sampleStep);
+
+      for (let y = startY; y < endY; y += 3) {
+        for (let x = startX; x < endX; x += 3) {
+          const index = (y * width + x) * 4;
+          const gray = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+          total += gray;
+          count++;
+        }
+      }
+
+      grid[gy * gridWidth + gx] = total / count;
+    }
+  }
+
+  const illumination = new Float32Array(width * height);
+  const blurRadius = 2;
+
+  for (let y = 0; y < height; y++) {
+    const gy = Math.min(gridHeight - 1, Math.floor(y / sampleStep));
+    for (let x = 0; x < width; x++) {
+      const gx = Math.min(gridWidth - 1, Math.floor(x / sampleStep));
+      let total = 0;
+      let count = 0;
+
+      for (let dy = -blurRadius; dy <= blurRadius; dy++) {
+        for (let dx = -blurRadius; dx <= blurRadius; dx++) {
+          const sx = Math.max(0, Math.min(gridWidth - 1, gx + dx));
+          const sy = Math.max(0, Math.min(gridHeight - 1, gy + dy));
+          total += grid[sy * gridWidth + sx];
+          count++;
+        }
+      }
+
+      illumination[y * width + x] = total / count;
+    }
+  }
+
+  return illumination;
 }
 
 function getGrayLevels(data) {
