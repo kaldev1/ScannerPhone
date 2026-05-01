@@ -114,6 +114,7 @@ async function startCamera() {
     els.video.srcObject = state.stream;
     await els.video.play();
     await enableContinuousFocus();
+    els.canvas.hidden = true;
     els.video.hidden = false;
     els.empty.hidden = true;
     els.cameraOverlay.hidden = false;
@@ -1289,8 +1290,18 @@ function retakeLastPage() {
   if (!state.pages.length) return;
   state.pages.pop();
   renderPages();
-  setQuality(state.stream ? "Aim at page" : "Review", state.stream ? "needs-review" : "");
-  setStatus(state.stream ? nextCaptureMessage() : "Last page removed. Add or capture a replacement page.");
+  els.canvas.hidden = true;
+  els.empty.hidden = true;
+
+  if (state.stream) {
+    setQuality("Aim at page", "needs-review");
+    setStatus(nextCaptureMessage());
+    return;
+  }
+
+  setQuality("Aim at page", "needs-review");
+  setStatus("Last page removed. Capture the replacement page.");
+  startCamera();
 }
 
 function finishScan() {
