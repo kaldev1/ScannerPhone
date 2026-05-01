@@ -40,8 +40,8 @@ const els = {
 };
 
 const MAX_OUTPUT_EDGE = 2200;
-const GUIDE_DETECT_INTERVAL = 190;
-const GUIDE_SAMPLE_EDGE = 420;
+const GUIDE_DETECT_INTERVAL = 120;
+const GUIDE_SAMPLE_EDGE = 480;
 const CAPTURE_SAMPLE_EDGE = 620;
 
 init();
@@ -177,11 +177,12 @@ function drawDocumentGuide() {
 
   if (now - state.guideLastRun > GUIDE_DETECT_INTERVAL) {
     state.guideLastRun = now;
-    const frame = document.createElement("canvas");
-    frame.width = els.video.videoWidth;
-    frame.height = els.video.videoHeight;
-    frame.getContext("2d").drawImage(els.video, 0, 0);
-    const quad = detectDocumentQuad(frame, GUIDE_SAMPLE_EDGE);
+    const { frame, scaleX, scaleY } = captureGuideFrame();
+    const detected = detectDocumentQuad(frame, GUIDE_SAMPLE_EDGE);
+    const quad = detected?.map((point) => ({
+      x: point.x * scaleX,
+      y: point.y * scaleY
+    }));
 
     if (quad) {
       state.guideQuad = smoothQuad(state.guideQuad, quad, 0.35);
@@ -216,6 +217,19 @@ function drawDocumentGuide() {
     ctx.strokeStyle = "#16a34a";
     ctx.stroke();
   }
+}
+
+function captureGuideFrame() {
+  const scale = Math.min(1, GUIDE_SAMPLE_EDGE / Math.max(els.video.videoWidth, els.video.videoHeight));
+  const frame = document.createElement("canvas");
+  frame.width = Math.max(1, Math.round(els.video.videoWidth * scale));
+  frame.height = Math.max(1, Math.round(els.video.videoHeight * scale));
+  frame.getContext("2d", { willReadFrequently: true }).drawImage(els.video, 0, 0, frame.width, frame.height);
+  return {
+    frame,
+    scaleX: els.video.videoWidth / frame.width,
+    scaleY: els.video.videoHeight / frame.height
+  };
 }
 
 function smoothQuad(previous, next, amount) {
@@ -523,14 +537,35 @@ function detectDocumentQuad(canvas, sampleEdge = CAPTURE_SAMPLE_EDGE) {
   const mask = createDocumentMask(luminance, width, height, mean, borderMean);
   closeMask(mask, width, height, 3);
   const component = findBestDocumentComponent(mask, width, height);
-  if (!component?.corners) return null;
+  if (!component?.corners) {
+    return detectFallbackQuad(luminance, width, height, scale);
+  }
 
   const quad = orderQuad(component.corners).map((point) => ({
     x: Math.round(point.x / scale),
     y: Math.round(point.y / scale)
   }));
 
-  if (!isUsableQuad(quad, canvas.width, canvas.height)) return null;
+  if (!isUsableQuad(quad, canvas.width, canvas.height)) {
+    return detectFallbackQuad(luminance, width, height, scale);
+  }
+  return quad;
+}
+
+function detectFallbackQuad(luminance, width, height, scale) {
+  const bounds = detectFallbackBounds(luminance, width, height, 1);
+  if (!bounds) return null;
+
+  const quad = [
+    { x: bounds.x, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+    { x: bounds.x, y: bounds.y + bounds.height }
+  ].map((point) => ({
+    x: Math.round(point.x / scale),
+    y: Math.round(point.y / scale)
+  }));
+
   return quad;
 }
 
