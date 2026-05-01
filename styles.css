@@ -101,6 +101,57 @@ button:disabled {
   overflow: hidden;
 }
 
+.batch-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #ffffff;
+  border-bottom: 1px solid var(--line);
+}
+
+.batch-strip div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.batch-strip span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.batch-strip strong {
+  font-size: 1rem;
+}
+
+.quality-pill {
+  min-width: 84px;
+  min-height: 32px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  padding: 0 12px;
+  background: #ecfdf5;
+  color: var(--brand-dark);
+  font-size: 0.82rem;
+  font-weight: 900;
+  text-align: center;
+}
+
+.quality-pill.needs-review {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.quality-pill.bad {
+  background: #fef2f2;
+  color: var(--danger);
+}
+
 .camera-frame {
   position: relative;
   display: grid;
@@ -213,6 +264,18 @@ button:disabled {
   padding: 12px;
 }
 
+.progress-track {
+  height: 7px;
+  background: #dbe4e1;
+}
+
+.progress-track div {
+  width: 0%;
+  height: 100%;
+  background: var(--brand);
+  transition: width 180ms ease;
+}
+
 .primary-action,
 .secondary-action,
 .ghost-action,
@@ -266,6 +329,17 @@ button:disabled {
 }
 
 select {
+  width: 100%;
+  min-height: 42px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  color: var(--ink);
+  padding: 0 10px;
+}
+
+.setting-row input[type="number"],
+.setting-row input[type="text"] {
   width: 100%;
   min-height: 42px;
   border-radius: 8px;
@@ -358,6 +432,15 @@ select {
 
 .page-card-actions button[data-action="remove"] {
   color: var(--danger);
+}
+
+.page-warning {
+  margin: 0;
+  padding: 0 8px 8px;
+  color: #9a3412;
+  font-size: 0.76rem;
+  font-weight: 800;
+  line-height: 1.25;
 }
 
 .export-bar {
@@ -458,5 +541,20 @@ select {
     transform: translateX(-50%);
     width: min(540px, calc(100% - 28px));
     border-radius: 12px 12px 0 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .controls {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-strip {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .quality-pill {
+    justify-self: start;
   }
 }

@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "scannerphone-v1";
+const CACHE_NAME = "scannerphone-v2";
 const ASSETS = [
   "index.html",
   "styles.css",

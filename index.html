@@ -12,7 +12,7 @@
     <header class="app-header">
       <div>
         <h1>ScannerPhone</h1>
-        <p>Scan documents with your phone camera</p>
+        <p>Batch scan documents to PDF</p>
       </div>
       <button id="installButton" class="icon-button" type="button" hidden title="Install app" aria-label="Install app">
         <span aria-hidden="true">+</span>
@@ -21,46 +21,68 @@
 
     <main class="app-shell">
       <section class="capture-panel" aria-label="Document capture">
+        <div class="batch-strip">
+          <div>
+            <span id="targetSummary">Batch scan</span>
+            <strong id="captureProgressText">0 pages captured</strong>
+          </div>
+          <div id="qualityText" class="quality-pill">Ready</div>
+        </div>
+
         <div class="camera-frame">
           <video id="cameraPreview" playsinline muted hidden></video>
           <canvas id="workingCanvas" hidden></canvas>
           <canvas id="documentGuide" class="document-guide" hidden></canvas>
           <div id="focusIndicator" class="focus-indicator" hidden></div>
           <div id="emptyState" class="empty-state">
-            <strong>No document selected</strong>
-            <span id="statusText">Use the camera or choose existing photos.</span>
+            <strong>Ready to scan</strong>
+            <span id="statusText">Set a page count or leave it blank, then start scanning.</span>
           </div>
           <div id="cameraOverlay" class="camera-overlay" hidden>
             <button id="snapButton" class="shutter-button" type="button" title="Capture" aria-label="Capture"></button>
           </div>
         </div>
 
+        <div class="progress-track" aria-hidden="true">
+          <div id="progressFill"></div>
+        </div>
+
         <div class="controls">
-          <button id="cameraButton" class="primary-action" type="button">Open Camera</button>
+          <button id="cameraButton" class="primary-action" type="button">Start Scanning</button>
           <label class="secondary-action" for="fileInput">Add Photos</label>
           <input id="cameraInput" type="file" accept="image/*" capture="environment">
           <input id="fileInput" type="file" accept="image/*" multiple>
+          <button id="retakeLastButton" class="ghost-action" type="button" disabled>Retake Last</button>
+          <button id="finishScanButton" class="ghost-action" type="button" disabled>Review PDF</button>
           <button id="stopCameraButton" class="ghost-action" type="button" hidden>Close Camera</button>
         </div>
       </section>
 
       <section class="settings-panel" aria-label="Scan settings">
         <div class="setting-row">
+          <label for="targetPagesInput">Pages to scan</label>
+          <input id="targetPagesInput" type="number" min="1" max="200" inputmode="numeric" placeholder="Blank">
+        </div>
+        <div class="setting-row">
           <label for="modeSelect">Look</label>
           <select id="modeSelect">
             <option value="document">Clean document</option>
-            <option value="grayscale">Grayscale</option>
             <option value="color">Enhanced color</option>
+            <option value="grayscale">Grayscale</option>
             <option value="original">Original</option>
           </select>
         </div>
         <div class="setting-row">
           <label for="paperSelect">PDF paper</label>
           <select id="paperSelect">
-            <option value="fit">Fit image</option>
             <option value="a4">A4 portrait</option>
             <option value="letter">Letter portrait</option>
+            <option value="fit">Fit image</option>
           </select>
+        </div>
+        <div class="setting-row">
+          <label for="pdfNameInput">PDF name</label>
+          <input id="pdfNameInput" type="text" placeholder="scan">
         </div>
         <label class="check-row">
           <input id="autoCropInput" type="checkbox" checked>
@@ -70,15 +92,15 @@
 
       <section class="pages-panel" aria-label="Scanned pages">
         <div class="panel-title">
-          <h2>Pages</h2>
+          <h2 id="reviewTitle">Review PDF</h2>
           <span id="pageCount">0</span>
         </div>
         <div id="pageList" class="page-list"></div>
       </section>
 
       <nav class="export-bar" aria-label="Export">
-        <button id="saveJpgButton" type="button" disabled>Save JPG</button>
         <button id="savePdfButton" type="button" disabled>Save PDF</button>
+        <button id="saveJpgButton" type="button" disabled>Save JPG</button>
         <button id="clearButton" type="button" disabled>Clear</button>
       </nav>
 
@@ -98,6 +120,7 @@
           <button type="button" data-action="down" title="Move down" aria-label="Move down">↓</button>
           <button type="button" data-action="remove" title="Remove" aria-label="Remove">×</button>
         </div>
+        <p class="page-warning" hidden></p>
       </article>
     </template>
 
