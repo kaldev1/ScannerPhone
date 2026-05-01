@@ -1,0 +1,17 @@
+{
+  "name": "ScannerPhone",
+  "short_name": "ScannerPhone",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#eef2f1",
+  "theme_color": "#0f766e",
+  "description": "Scan documents with an Android phone camera and export JPG or multi-page PDF.",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

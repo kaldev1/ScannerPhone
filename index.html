@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0f766e">
+    <title>ScannerPhone</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>ScannerPhone</h1>
+        <p>Scan documents with your phone camera</p>
+      </div>
+      <button id="installButton" class="icon-button" type="button" hidden title="Install app" aria-label="Install app">
+        <span aria-hidden="true">+</span>
+      </button>
+    </header>
+
+    <main class="app-shell">
+      <section class="capture-panel" aria-label="Document capture">
+        <div class="camera-frame">
+          <video id="cameraPreview" playsinline muted hidden></video>
+          <canvas id="workingCanvas" hidden></canvas>
+          <div id="emptyState" class="empty-state">
+            <strong>No document selected</strong>
+            <span id="statusText">Use the camera or choose existing photos.</span>
+          </div>
+        </div>
+
+        <div class="controls">
+          <button id="cameraButton" class="primary-action" type="button">Open Camera</button>
+          <label class="secondary-action" for="fileInput">Add Photos</label>
+          <input id="cameraInput" type="file" accept="image/*" capture="environment">
+          <input id="fileInput" type="file" accept="image/*" multiple>
+          <button id="snapButton" class="secondary-action" type="button" hidden>Capture</button>
+          <button id="stopCameraButton" class="ghost-action" type="button" hidden>Close Camera</button>
+        </div>
+      </section>
+
+      <section class="settings-panel" aria-label="Scan settings">
+        <div class="setting-row">
+          <label for="modeSelect">Look</label>
+          <select id="modeSelect">
+            <option value="document">Clean document</option>
+            <option value="grayscale">Grayscale</option>
+            <option value="color">Enhanced color</option>
+            <option value="original">Original</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <label for="paperSelect">PDF paper</label>
+          <select id="paperSelect">
+            <option value="fit">Fit image</option>
+            <option value="a4">A4 portrait</option>
+            <option value="letter">Letter portrait</option>
+          </select>
+        </div>
+        <label class="check-row">
+          <input id="autoCropInput" type="checkbox" checked>
+          <span>Auto crop document edges</span>
+        </label>
+      </section>
+
+      <section class="pages-panel" aria-label="Scanned pages">
+        <div class="panel-title">
+          <h2>Pages</h2>
+          <span id="pageCount">0</span>
+        </div>
+        <div id="pageList" class="page-list"></div>
+      </section>
+
+      <nav class="export-bar" aria-label="Export">
+        <button id="saveJpgButton" type="button" disabled>Save JPG</button>
+        <button id="savePdfButton" type="button" disabled>Save PDF</button>
+        <button id="clearButton" type="button" disabled>Clear</button>
+      </nav>
+    </main>
+
+    <template id="pageTemplate">
+      <article class="page-card">
+        <img alt="">
+        <div class="page-card-actions">
+          <span></span>
+          <button type="button" data-action="up" title="Move up" aria-label="Move up">↑</button>
+          <button type="button" data-action="down" title="Move down" aria-label="Move down">↓</button>
+          <button type="button" data-action="remove" title="Remove" aria-label="Remove">×</button>
+        </div>
+      </article>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>
