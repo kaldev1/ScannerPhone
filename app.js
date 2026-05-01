@@ -981,8 +981,8 @@ function applyScanFilter(ctx, width, height, mode) {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
   const grayscale = mode === "document" || mode === "grayscale";
-  const contrast = mode === "document" ? 1.22 : mode === "color" ? 1.12 : 1.12;
-  const brightness = mode === "document" ? 7 : mode === "color" ? 4 : 2;
+  const contrast = mode === "document" ? 1.32 : mode === "color" ? 1.12 : 1.12;
+  const brightness = mode === "document" ? 0 : mode === "color" ? 4 : 2;
   const levels = grayscale ? getGrayLevels(data) : null;
   const illumination = mode === "document" ? estimateIllumination(data, width, height) : null;
 
@@ -994,9 +994,9 @@ function applyScanFilter(ctx, width, height, mode) {
     if (grayscale) {
       const gray = 0.299 * r + 0.587 * g + 0.114 * b;
       const bg = illumination ? illumination[Math.floor(i / 4)] : 220;
-      const corrected = mode === "document" ? clamp(gray + (222 - bg) * 0.72) : gray;
+      const corrected = mode === "document" ? clamp(gray + (212 - bg) * 0.42) : gray;
       const normalized = normalizeLevel(corrected, levels.black, levels.white);
-      const leveled = mode === "document" ? corrected * 0.38 + normalized * 0.62 : gray * 0.55 + normalized * 0.45;
+      const leveled = mode === "document" ? corrected * 0.62 + normalized * 0.38 : gray * 0.55 + normalized * 0.45;
       r = leveled;
       g = leveled;
       b = leveled;
@@ -1008,8 +1008,9 @@ function applyScanFilter(ctx, width, height, mode) {
 
     if (mode === "document") {
       const v = data[i];
-      const paperLift = v > 168 ? Math.min(246, v + (246 - v) * 0.48) : v;
-      const inkWeight = paperLift < 98 ? Math.max(20, paperLift * 0.76) : paperLift;
+      const paperLift = v > 188 ? Math.min(242, v + (242 - v) * 0.2) : v;
+      const midTone = paperLift < 172 ? Math.max(22, paperLift * 0.88) : paperLift;
+      const inkWeight = midTone < 122 ? Math.max(16, midTone * 0.68) : midTone;
       const scanned = clamp(inkWeight);
       data[i] = scanned;
       data[i + 1] = scanned;
@@ -1084,11 +1085,11 @@ function getGrayLevels(data) {
     count++;
   }
 
-  const black = histogramPercentile(histogram, count, 0.04);
-  const white = histogramPercentile(histogram, count, 0.9);
+  const black = histogramPercentile(histogram, count, 0.06);
+  const white = histogramPercentile(histogram, count, 0.92);
   return {
-    black: Math.min(black, 95),
-    white: Math.max(white, 188)
+    black: Math.min(black, 118),
+    white: Math.max(white, 198)
   };
 }
 
@@ -1106,7 +1107,7 @@ function histogramPercentile(histogram, count, percentile) {
 
 function normalizeLevel(value, black, white) {
   if (white <= black + 12) return value;
-  return clamp(((value - black) / (white - black)) * 236 + 12);
+  return clamp(((value - black) / (white - black)) * 224 + 18);
 }
 
 function clamp(value) {
