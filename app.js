@@ -9,7 +9,9 @@ const state = {
   guideLastRun: 0,
   guideLastSeen: 0,
   focusTimer: 0,
-  targetPages: null
+  targetPages: null,
+  reviewTimer: 0,
+  pendingReviewPageId: null
 };
 
 const els = {
@@ -24,6 +26,11 @@ const els = {
   dockCloseButton: document.querySelector("#dockCloseButton"),
   stopCameraButton: document.querySelector("#stopCameraButton"),
   cameraOverlay: document.querySelector("#cameraOverlay"),
+  captureReviewOverlay: document.querySelector("#captureReviewOverlay"),
+  captureReviewTitle: document.querySelector("#captureReviewTitle"),
+  captureReviewStatus: document.querySelector("#captureReviewStatus"),
+  reviewRetakeButton: document.querySelector("#reviewRetakeButton"),
+  reviewKeepButton: document.querySelector("#reviewKeepButton"),
   cameraDock: document.querySelector("#cameraDock"),
   cameraInput: document.querySelector("#cameraInput"),
   fileInput: document.querySelector("#fileInput"),
@@ -72,6 +79,8 @@ function bindEvents() {
   els.dockSnapButton.addEventListener("click", captureFromCamera);
   els.dockCloseButton.addEventListener("click", stopCamera);
   els.stopCameraButton.addEventListener("click", stopCamera);
+  els.reviewKeepButton.addEventListener("click", keepReviewedCapture);
+  els.reviewRetakeButton.addEventListener("click", retakeReviewedCapture);
   els.cameraInput.addEventListener("change", handleCameraInput);
   els.fileInput.addEventListener("change", handleFileInput);
   els.targetPagesInput.addEventListener("input", updateTargetPages);
@@ -132,6 +141,7 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  clearCaptureReview();
   stopDocumentGuide();
   if (state.stream) {
     for (const track of state.stream.getTracks()) {
@@ -142,6 +152,7 @@ function stopCamera() {
   els.video.srcObject = null;
   els.video.hidden = true;
   els.cameraOverlay.hidden = true;
+  els.captureReviewOverlay.hidden = true;
   els.documentGuide.hidden = true;
   els.cameraDock.hidden = true;
   els.cameraButton.hidden = false;
@@ -356,20 +367,21 @@ function showFocusBox(x, y, width, height, className) {
 
 async function captureFromCamera() {
   if (!els.video.videoWidth || !els.video.videoHeight) return;
+  clearCaptureReview();
   els.snapButton.disabled = true;
   els.dockSnapButton.disabled = true;
   try {
     setQuality("Capturing", "needs-review");
     setStatus("Capturing a sharp frame...");
     const capture = await captureSharpFrame();
-    await addImageCanvas(capture.canvas, { sharpness: capture.score });
+    const page = await addImageCanvas(capture.canvas, { sharpness: capture.score });
     resetDocumentGuideDetection();
     const targetReached = state.targetPages && state.pages.length >= state.targetPages;
     if (targetReached) {
       finishScan();
       setStatus(`Captured ${state.pages.length} pages. Review the PDF before saving.`);
     } else {
-      setStatus(nextCaptureMessage());
+      showCaptureReview(page);
     }
   } finally {
     els.snapButton.disabled = false;
@@ -383,6 +395,66 @@ function resetDocumentGuideDetection() {
   state.guideLastSeen = 0;
   const ctx = els.documentGuide.getContext("2d");
   ctx.clearRect(0, 0, els.documentGuide.width, els.documentGuide.height);
+}
+
+function showCaptureReview(page) {
+  state.pendingReviewPageId = page.id;
+  els.video.hidden = true;
+  els.canvas.hidden = false;
+  els.cameraOverlay.hidden = true;
+  els.cameraDock.hidden = true;
+  els.documentGuide.hidden = true;
+  els.captureReviewOverlay.hidden = false;
+  els.captureReviewTitle.textContent = `Page ${state.pages.length} captured`;
+
+  if (page.warnings?.length) {
+    els.captureReviewStatus.textContent = `Check: ${page.warnings.join(", ")}`;
+    setStatus("Review this scan before continuing.");
+    setQuality("Review", "needs-review");
+    return;
+  }
+
+  els.captureReviewStatus.textContent = "Auto continuing...";
+  setStatus("Scan looks good. Returning to camera.");
+  state.reviewTimer = setTimeout(keepReviewedCapture, 1800);
+}
+
+function keepReviewedCapture() {
+  if (!state.pendingReviewPageId) return;
+  clearCaptureReview();
+  resumeLiveCapture();
+  setStatus(nextCaptureMessage());
+}
+
+function retakeReviewedCapture() {
+  if (!state.pendingReviewPageId) return;
+  const index = state.pages.findIndex((page) => page.id === state.pendingReviewPageId);
+  if (index >= 0) {
+    state.pages.splice(index, 1);
+  }
+  clearCaptureReview();
+  renderPages();
+  resumeLiveCapture();
+  setStatus(nextCaptureMessage());
+}
+
+function clearCaptureReview() {
+  clearTimeout(state.reviewTimer);
+  state.reviewTimer = 0;
+  state.pendingReviewPageId = null;
+  els.captureReviewOverlay.hidden = true;
+}
+
+function resumeLiveCapture() {
+  if (!state.stream) return;
+  els.canvas.hidden = true;
+  els.empty.hidden = true;
+  els.video.hidden = false;
+  els.cameraOverlay.hidden = false;
+  els.cameraDock.hidden = false;
+  els.documentGuide.hidden = false;
+  startDocumentGuide();
+  setQuality("Aim at page", "needs-review");
 }
 
 async function captureSharpFrame() {
@@ -580,7 +652,7 @@ async function addImageCanvas(source, capture = {}) {
   const originalDataUrl = source.toDataURL("image/jpeg", 0.94);
   const processed = processCanvas(source);
   const quality = assessCaptureQuality(source, processed, capture.sharpness);
-  state.pages.push({
+  const page = {
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
     originalDataUrl,
     processedDataUrl: processed.canvas.toDataURL("image/jpeg", 0.95),
@@ -589,10 +661,12 @@ async function addImageCanvas(source, capture = {}) {
     cropMode: processed.cropMode,
     warnings: quality.warnings,
     qualityLabel: quality.label
-  });
+  };
+  state.pages.push(page);
   setQuality(quality.label, quality.className);
   drawPreview(processed.canvas);
   renderPages();
+  return page;
 }
 
 async function reprocessAllPages() {
@@ -1287,6 +1361,11 @@ function handlePageAction(event) {
 }
 
 function retakeLastPage() {
+  if (state.pendingReviewPageId) {
+    retakeReviewedCapture();
+    return;
+  }
+
   if (!state.pages.length) return;
   state.pages.pop();
   renderPages();
@@ -1305,6 +1384,7 @@ function retakeLastPage() {
 }
 
 function finishScan() {
+  clearCaptureReview();
   stopCamera();
   setQuality(state.pages.length ? "Review" : "Ready");
   setStatus(state.pages.length ? "Review pages, retake any weak scans, then save the PDF." : "No pages captured yet.");
@@ -1403,6 +1483,7 @@ function fitRect(srcWidth, srcHeight, destWidth, destHeight) {
 }
 
 function clearPages() {
+  clearCaptureReview();
   state.pages = [];
   setQuality("Ready");
   setStatus("Set a page count or leave it blank, then start scanning.");

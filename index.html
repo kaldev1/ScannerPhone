@@ -41,6 +41,16 @@
           <div id="cameraOverlay" class="camera-overlay" hidden>
             <button id="snapButton" class="shutter-button" type="button" title="Capture" aria-label="Capture"></button>
           </div>
+          <div id="captureReviewOverlay" class="capture-review-overlay" hidden>
+            <div>
+              <strong id="captureReviewTitle">Page captured</strong>
+              <span id="captureReviewStatus">Auto continuing...</span>
+            </div>
+            <div class="capture-review-actions">
+              <button id="reviewRetakeButton" class="review-retake-button" type="button">Retake</button>
+              <button id="reviewKeepButton" class="review-keep-button" type="button">Keep</button>
+            </div>
+          </div>
         </div>
 
         <div class="progress-track" aria-hidden="true">
