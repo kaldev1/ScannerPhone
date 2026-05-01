@@ -13,6 +13,7 @@ const els = {
   cameraButton: document.querySelector("#cameraButton"),
   snapButton: document.querySelector("#snapButton"),
   stopCameraButton: document.querySelector("#stopCameraButton"),
+  cameraOverlay: document.querySelector("#cameraOverlay"),
   cameraInput: document.querySelector("#cameraInput"),
   fileInput: document.querySelector("#fileInput"),
   statusText: document.querySelector("#statusText"),
@@ -82,7 +83,7 @@ async function startCamera() {
     await els.video.play();
     els.video.hidden = false;
     els.empty.hidden = true;
-    els.snapButton.hidden = false;
+    els.cameraOverlay.hidden = false;
     els.stopCameraButton.hidden = false;
   } catch (error) {
     setStatus(cameraErrorMessage(error));
@@ -99,7 +100,7 @@ function stopCamera() {
   state.stream = null;
   els.video.srcObject = null;
   els.video.hidden = true;
-  els.snapButton.hidden = true;
+  els.cameraOverlay.hidden = true;
   els.stopCameraButton.hidden = true;
   updatePreviewVisibility();
 }
@@ -211,7 +212,7 @@ function processCanvas(source) {
 }
 
 function detectDocumentBounds(canvas) {
-  const sampleEdge = 700;
+  const sampleEdge = 620;
   const scale = Math.min(1, sampleEdge / Math.max(canvas.width, canvas.height));
   const sample = document.createElement("canvas");
   sample.width = Math.max(1, Math.round(canvas.width * scale));
@@ -219,46 +220,210 @@ function detectDocumentBounds(canvas) {
   const ctx = sample.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(canvas, 0, 0, sample.width, sample.height);
   const data = ctx.getImageData(0, 0, sample.width, sample.height).data;
-  const luminance = [];
-  let sum = 0;
+  const width = sample.width;
+  const height = sample.height;
+  const luminance = new Float32Array(width * height);
+  let total = 0;
 
   for (let i = 0; i < data.length; i += 4) {
     const value = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    luminance.push(value);
-    sum += value;
+    luminance[i / 4] = value;
+    total += value;
   }
 
-  const mean = sum / luminance.length;
-  const threshold = Math.min(225, Math.max(95, mean + 18));
-  let minX = sample.width;
-  let minY = sample.height;
-  let maxX = 0;
-  let maxY = 0;
-  let hits = 0;
+  const mean = total / luminance.length;
+  const mask = new Uint8Array(width * height);
+  const borderMean = estimateBorderMean(luminance, width, height);
+  const lightThreshold = Math.min(235, Math.max(115, mean + 10, borderMean + 22));
 
-  for (let y = 0; y < sample.height; y++) {
-    for (let x = 0; x < sample.width; x++) {
-      const value = luminance[y * sample.width + x];
-      if (value >= threshold) {
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x);
-        maxY = Math.max(maxY, y);
-        hits++;
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const index = y * width + x;
+      const gx = Math.abs(luminance[index + 1] - luminance[index - 1]);
+      const gy = Math.abs(luminance[index + width] - luminance[index - width]);
+      const localContrast = Math.max(gx, gy);
+      const isPageLight = luminance[index] > lightThreshold && luminance[index] > borderMean + 18;
+      const isInsideEdge = localContrast < 58 && luminance[index] > mean - 20;
+
+      if (isPageLight || (isInsideEdge && luminance[index] > 150)) {
+        mask[index] = 1;
       }
     }
   }
 
-  const coverage = hits / luminance.length;
-  if (coverage < 0.12 || coverage > 0.92 || maxX <= minX || maxY <= minY) {
-    return null;
+  closeMask(mask, width, height, 2);
+  const component = findBestDocumentComponent(mask, width, height);
+  if (!component) {
+    return detectFallbackBounds(luminance, width, height, scale);
   }
 
-  const pad = Math.round(Math.min(sample.width, sample.height) * 0.025);
-  minX = Math.max(0, minX - pad);
-  minY = Math.max(0, minY - pad);
-  maxX = Math.min(sample.width - 1, maxX + pad);
-  maxY = Math.min(sample.height - 1, maxY + pad);
+  return boundsToSource(component, width, height, scale);
+}
+
+function estimateBorderMean(luminance, width, height) {
+  const band = Math.max(4, Math.round(Math.min(width, height) * 0.06));
+  let total = 0;
+  let count = 0;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (x < band || y < band || x >= width - band || y >= height - band) {
+        total += luminance[y * width + x];
+        count++;
+      }
+    }
+  }
+
+  return total / count;
+}
+
+function closeMask(mask, width, height, radius) {
+  const dilated = new Uint8Array(mask.length);
+  for (let y = radius; y < height - radius; y++) {
+    for (let x = radius; x < width - radius; x++) {
+      let found = false;
+      for (let dy = -radius; dy <= radius && !found; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          if (mask[(y + dy) * width + x + dx]) {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (found) dilated[y * width + x] = 1;
+    }
+  }
+
+  mask.set(dilated);
+}
+
+function findBestDocumentComponent(mask, width, height) {
+  const visited = new Uint8Array(mask.length);
+  const queue = new Int32Array(mask.length);
+  const minArea = width * height * 0.08;
+  let best = null;
+
+  for (let start = 0; start < mask.length; start++) {
+    if (!mask[start] || visited[start]) continue;
+
+    let head = 0;
+    let tail = 0;
+    let area = 0;
+    let minX = width;
+    let minY = height;
+    let maxX = 0;
+    let maxY = 0;
+
+    queue[tail++] = start;
+    visited[start] = 1;
+
+    while (head < tail) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = Math.floor(index / width);
+      area++;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+
+      addNeighbor(index - 1, x > 0);
+      addNeighbor(index + 1, x < width - 1);
+      addNeighbor(index - width, y > 0);
+      addNeighbor(index + width, y < height - 1);
+    }
+
+    const boxWidth = maxX - minX + 1;
+    const boxHeight = maxY - minY + 1;
+    const boxArea = boxWidth * boxHeight;
+    const fill = area / boxArea;
+    const coverage = boxArea / (width * height);
+    const touchesManyEdges = Number(minX < 3) + Number(minY < 3) + Number(maxX > width - 4) + Number(maxY > height - 4);
+
+    if (area >= minArea && fill > 0.34 && coverage > 0.12 && coverage < 0.92 && touchesManyEdges < 3) {
+      const score = area * fill * (1 - Math.abs(0.46 - coverage));
+      if (!best || score > best.score) {
+        best = { minX, minY, maxX, maxY, score };
+      }
+    }
+
+    function addNeighbor(next, inBounds) {
+      if (inBounds && mask[next] && !visited[next]) {
+        visited[next] = 1;
+        queue[tail++] = next;
+      }
+    }
+  }
+
+  return best;
+}
+
+function detectFallbackBounds(luminance, width, height, scale) {
+  const edge = new Uint8Array(width * height);
+  let edgeTotal = 0;
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const index = y * width + x;
+      const gx = Math.abs(luminance[index + 1] - luminance[index - 1]);
+      const gy = Math.abs(luminance[index + width] - luminance[index - width]);
+      const value = gx + gy;
+      if (value > 42) {
+        edge[index] = 1;
+        edgeTotal++;
+      }
+    }
+  }
+
+  if (edgeTotal < width * height * 0.015) return null;
+
+  const columns = projectionBounds(edge, width, height, "x");
+  const rows = projectionBounds(edge, width, height, "y");
+  if (!columns || !rows) return null;
+
+  const component = {
+    minX: columns.min,
+    maxX: columns.max,
+    minY: rows.min,
+    maxY: rows.max
+  };
+  return boundsToSource(component, width, height, scale);
+}
+
+function projectionBounds(edge, width, height, axis) {
+  const size = axis === "x" ? width : height;
+  const limit = axis === "x" ? height : width;
+  const counts = new Uint16Array(size);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (edge[y * width + x]) {
+        counts[axis === "x" ? x : y]++;
+      }
+    }
+  }
+
+  const threshold = Math.max(3, Math.round(limit * 0.025));
+  let min = 0;
+  let max = size - 1;
+
+  while (min < size && counts[min] < threshold) min++;
+  while (max > min && counts[max] < threshold) max--;
+
+  if (max - min < size * 0.28 || max - min > size * 0.96) return null;
+  return { min, max };
+}
+
+function boundsToSource(bounds, width, height, scale) {
+  const pad = Math.round(Math.min(width, height) * 0.018);
+  const minX = Math.max(0, bounds.minX - pad);
+  const minY = Math.max(0, bounds.minY - pad);
+  const maxX = Math.min(width - 1, bounds.maxX + pad);
+  const maxY = Math.min(height - 1, bounds.maxY + pad);
+
+  if (maxX - minX < width * 0.28 || maxY - minY < height * 0.28) {
+    return null;
+  }
 
   return {
     x: Math.round(minX / scale),

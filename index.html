@@ -28,6 +28,9 @@
             <strong>No document selected</strong>
             <span id="statusText">Use the camera or choose existing photos.</span>
           </div>
+          <div id="cameraOverlay" class="camera-overlay" hidden>
+            <button id="snapButton" class="shutter-button" type="button" title="Capture" aria-label="Capture"></button>
+          </div>
         </div>
 
         <div class="controls">
@@ -35,7 +38,6 @@
           <label class="secondary-action" for="fileInput">Add Photos</label>
           <input id="cameraInput" type="file" accept="image/*" capture="environment">
           <input id="fileInput" type="file" accept="image/*" multiple>
-          <button id="snapButton" class="secondary-action" type="button" hidden>Capture</button>
           <button id="stopCameraButton" class="ghost-action" type="button" hidden>Close Camera</button>
         </div>
       </section>
