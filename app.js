@@ -3,12 +3,15 @@
 const state = {
   pages: [],
   stream: null,
-  deferredInstall: null
+  deferredInstall: null,
+  guideFrame: 0,
+  guideQuad: null
 };
 
 const els = {
   video: document.querySelector("#cameraPreview"),
   canvas: document.querySelector("#workingCanvas"),
+  documentGuide: document.querySelector("#documentGuide"),
   empty: document.querySelector("#emptyState"),
   cameraButton: document.querySelector("#cameraButton"),
   snapButton: document.querySelector("#snapButton"),
@@ -89,9 +92,11 @@ async function startCamera() {
     els.video.hidden = false;
     els.empty.hidden = true;
     els.cameraOverlay.hidden = false;
+    els.documentGuide.hidden = false;
     els.cameraDock.hidden = false;
     els.cameraButton.hidden = true;
     els.stopCameraButton.hidden = false;
+    startDocumentGuide();
   } catch (error) {
     setStatus(cameraErrorMessage(error));
     els.cameraInput.click();
@@ -99,6 +104,7 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  stopDocumentGuide();
   if (state.stream) {
     for (const track of state.stream.getTracks()) {
       track.stop();
@@ -108,10 +114,117 @@ function stopCamera() {
   els.video.srcObject = null;
   els.video.hidden = true;
   els.cameraOverlay.hidden = true;
+  els.documentGuide.hidden = true;
   els.cameraDock.hidden = true;
   els.cameraButton.hidden = false;
   els.stopCameraButton.hidden = true;
   updatePreviewVisibility();
+}
+
+function startDocumentGuide() {
+  stopDocumentGuide();
+
+  const draw = () => {
+    if (!state.stream || els.video.hidden) return;
+    drawDocumentGuide();
+    state.guideFrame = requestAnimationFrame(draw);
+  };
+
+  draw();
+}
+
+function stopDocumentGuide() {
+  if (state.guideFrame) {
+    cancelAnimationFrame(state.guideFrame);
+  }
+  state.guideFrame = 0;
+  state.guideQuad = null;
+  const ctx = els.documentGuide.getContext("2d");
+  ctx.clearRect(0, 0, els.documentGuide.width, els.documentGuide.height);
+}
+
+function drawDocumentGuide() {
+  const display = els.video.getBoundingClientRect();
+  const width = Math.max(1, Math.round(display.width * devicePixelRatio));
+  const height = Math.max(1, Math.round(display.height * devicePixelRatio));
+  if (els.documentGuide.width !== width || els.documentGuide.height !== height) {
+    els.documentGuide.width = width;
+    els.documentGuide.height = height;
+  }
+
+  const ctx = els.documentGuide.getContext("2d");
+  ctx.clearRect(0, 0, width, height);
+
+  if (!els.video.videoWidth || !els.video.videoHeight) return;
+  if (performance.now() - (drawDocumentGuide.lastRun || 0) < 450) {
+    return;
+  }
+  drawDocumentGuide.lastRun = performance.now();
+
+  const frame = document.createElement("canvas");
+  frame.width = els.video.videoWidth;
+  frame.height = els.video.videoHeight;
+  frame.getContext("2d").drawImage(els.video, 0, 0);
+  const quad = detectDocumentQuad(frame);
+  state.guideQuad = quad;
+
+  if (!quad) {
+    drawGuideHint(ctx, width, height);
+    return;
+  }
+
+  const points = quad.map((point) => mapVideoPointToDisplay(point, width, height));
+  ctx.lineWidth = Math.max(3, Math.round(4 * devicePixelRatio));
+  ctx.strokeStyle = "#22c55e";
+  ctx.fillStyle = "rgba(34, 197, 94, 0.12)";
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  for (const point of points) {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, Math.max(7, 9 * devicePixelRatio), 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.lineWidth = Math.max(2, Math.round(2 * devicePixelRatio));
+    ctx.strokeStyle = "#16a34a";
+    ctx.stroke();
+  }
+}
+
+function drawGuideHint(ctx, width, height) {
+  const marginX = width * 0.14;
+  const marginY = height * 0.16;
+  ctx.lineWidth = Math.max(2, Math.round(2 * devicePixelRatio));
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.62)";
+  ctx.setLineDash([14 * devicePixelRatio, 10 * devicePixelRatio]);
+  ctx.strokeRect(marginX, marginY, width - marginX * 2, height - marginY * 2);
+  ctx.setLineDash([]);
+}
+
+function mapVideoPointToDisplay(point, displayWidth, displayHeight) {
+  const videoRatio = els.video.videoWidth / els.video.videoHeight;
+  const displayRatio = displayWidth / displayHeight;
+  let drawnWidth = displayWidth;
+  let drawnHeight = displayHeight;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  if (displayRatio > videoRatio) {
+    drawnWidth = displayHeight * videoRatio;
+    offsetX = (displayWidth - drawnWidth) / 2;
+  } else {
+    drawnHeight = displayWidth / videoRatio;
+    offsetY = (displayHeight - drawnHeight) / 2;
+  }
+
+  return {
+    x: offsetX + (point.x / els.video.videoWidth) * drawnWidth,
+    y: offsetY + (point.y / els.video.videoHeight) * drawnHeight
+  };
 }
 
 async function captureFromCamera() {
@@ -207,17 +320,160 @@ async function reprocessAllPages() {
 }
 
 function processCanvas(source) {
-  const crop = els.autoCropInput.checked ? detectDocumentBounds(source) : null;
-  const canvas = document.createElement("canvas");
-  const src = crop || { x: 0, y: 0, width: source.width, height: source.height };
-  const size = scaledSize(src.width, src.height, MAX_OUTPUT_EDGE);
-  canvas.width = size.width;
-  canvas.height = size.height;
+  let canvas = document.createElement("canvas");
+  const quad = els.autoCropInput.checked ? detectDocumentQuad(source) : null;
+
+  if (quad) {
+    canvas = warpDocument(source, quad);
+  } else {
+    const crop = els.autoCropInput.checked ? detectDocumentBounds(source) : null;
+    const src = crop || { x: 0, y: 0, width: source.width, height: source.height };
+    const size = scaledSize(src.width, src.height, MAX_OUTPUT_EDGE);
+    canvas.width = size.width;
+    canvas.height = size.height;
+    canvas.getContext("2d", { willReadFrequently: true }).drawImage(source, src.x, src.y, src.width, src.height, 0, 0, canvas.width, canvas.height);
+  }
 
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(source, src.x, src.y, src.width, src.height, 0, 0, canvas.width, canvas.height);
   applyScanFilter(ctx, canvas.width, canvas.height, els.modeSelect.value);
   return { canvas };
+}
+
+function detectDocumentQuad(canvas) {
+  const sampleEdge = 620;
+  const scale = Math.min(1, sampleEdge / Math.max(canvas.width, canvas.height));
+  const sample = document.createElement("canvas");
+  sample.width = Math.max(1, Math.round(canvas.width * scale));
+  sample.height = Math.max(1, Math.round(canvas.height * scale));
+  const ctx = sample.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(canvas, 0, 0, sample.width, sample.height);
+  const data = ctx.getImageData(0, 0, sample.width, sample.height).data;
+  const width = sample.width;
+  const height = sample.height;
+  const luminance = new Float32Array(width * height);
+  let total = 0;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const value = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    luminance[i / 4] = value;
+    total += value;
+  }
+
+  const mean = total / luminance.length;
+  const borderMean = estimateBorderMean(luminance, width, height);
+  const mask = createDocumentMask(luminance, width, height, mean, borderMean);
+  closeMask(mask, width, height, 3);
+  const component = findBestDocumentComponent(mask, width, height);
+  if (!component?.corners) return null;
+
+  const quad = orderQuad(component.corners).map((point) => ({
+    x: Math.round(point.x / scale),
+    y: Math.round(point.y / scale)
+  }));
+
+  if (!isUsableQuad(quad, canvas.width, canvas.height)) return null;
+  return quad;
+}
+
+function createDocumentMask(luminance, width, height, mean, borderMean) {
+  const mask = new Uint8Array(width * height);
+  const lightThreshold = Math.min(238, Math.max(112, mean + 8, borderMean + 18));
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const index = y * width + x;
+      const gx = Math.abs(luminance[index + 1] - luminance[index - 1]);
+      const gy = Math.abs(luminance[index + width] - luminance[index - width]);
+      const contrast = Math.max(gx, gy);
+      const brightPage = luminance[index] > lightThreshold && luminance[index] > borderMean + 14;
+      const flatPage = contrast < 54 && luminance[index] > Math.max(142, mean - 18);
+      if (brightPage || flatPage) mask[index] = 1;
+    }
+  }
+
+  return mask;
+}
+
+function warpDocument(source, quad) {
+  const [tl, tr, br, bl] = quad;
+  const targetWidth = Math.round(Math.max(distance(tl, tr), distance(bl, br)));
+  const targetHeight = Math.round(Math.max(distance(tl, bl), distance(tr, br)));
+  const size = scaledSize(targetWidth, targetHeight, MAX_OUTPUT_EDGE);
+  const canvas = document.createElement("canvas");
+  canvas.width = size.width;
+  canvas.height = size.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const sourceCtx = source.getContext("2d", { willReadFrequently: true });
+  const sourceData = sourceCtx.getImageData(0, 0, source.width, source.height);
+  const output = ctx.createImageData(canvas.width, canvas.height);
+
+  for (let y = 0; y < canvas.height; y++) {
+    const v = canvas.height === 1 ? 0 : y / (canvas.height - 1);
+    for (let x = 0; x < canvas.width; x++) {
+      const u = canvas.width === 1 ? 0 : x / (canvas.width - 1);
+      const top = interpolatePoint(tl, tr, u);
+      const bottom = interpolatePoint(bl, br, u);
+      const src = interpolatePoint(top, bottom, v);
+      sampleBilinear(sourceData, source.width, source.height, src.x, src.y, output.data, (y * canvas.width + x) * 4);
+    }
+  }
+
+  ctx.putImageData(output, 0, 0);
+  return canvas;
+}
+
+function interpolatePoint(a, b, amount) {
+  return {
+    x: a.x + (b.x - a.x) * amount,
+    y: a.y + (b.y - a.y) * amount
+  };
+}
+
+function sampleBilinear(imageData, width, height, x, y, target, targetIndex) {
+  const safeX = Math.max(0, Math.min(width - 1, x));
+  const safeY = Math.max(0, Math.min(height - 1, y));
+  const x0 = Math.floor(safeX);
+  const y0 = Math.floor(safeY);
+  const x1 = Math.min(width - 1, x0 + 1);
+  const y1 = Math.min(height - 1, y0 + 1);
+  const tx = safeX - x0;
+  const ty = safeY - y0;
+  const data = imageData.data;
+
+  for (let channel = 0; channel < 4; channel++) {
+    const a = data[(y0 * width + x0) * 4 + channel];
+    const b = data[(y0 * width + x1) * 4 + channel];
+    const c = data[(y1 * width + x0) * 4 + channel];
+    const d = data[(y1 * width + x1) * 4 + channel];
+    target[targetIndex + channel] = a * (1 - tx) * (1 - ty) + b * tx * (1 - ty) + c * (1 - tx) * ty + d * tx * ty;
+  }
+}
+
+function distance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function isUsableQuad(quad, width, height) {
+  const area = polygonArea(quad);
+  const coverage = area / (width * height);
+  const minSide = Math.min(distance(quad[0], quad[1]), distance(quad[1], quad[2]), distance(quad[2], quad[3]), distance(quad[3], quad[0]));
+  return coverage > 0.08 && coverage < 0.94 && minSide > Math.min(width, height) * 0.18;
+}
+
+function polygonArea(points) {
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const next = points[(i + 1) % points.length];
+    area += points[i].x * next.y - next.x * points[i].y;
+  }
+  return Math.abs(area / 2);
+}
+
+function orderQuad(points) {
+  const center = points.reduce((sum, point) => ({ x: sum.x + point.x / points.length, y: sum.y + point.y / points.length }), { x: 0, y: 0 });
+  const sorted = points.slice().sort((a, b) => Math.atan2(a.y - center.y, a.x - center.x) - Math.atan2(b.y - center.y, b.x - center.x));
+  const topIndex = sorted.reduce((best, point, index) => point.x + point.y < sorted[best].x + sorted[best].y ? index : best, 0);
+  return [...sorted.slice(topIndex), ...sorted.slice(0, topIndex)];
 }
 
 function detectDocumentBounds(canvas) {
@@ -322,6 +578,10 @@ function findBestDocumentComponent(mask, width, height) {
     let minY = height;
     let maxX = 0;
     let maxY = 0;
+    let tl = { x: 0, y: 0, score: Infinity };
+    let tr = { x: 0, y: 0, score: -Infinity };
+    let br = { x: 0, y: 0, score: -Infinity };
+    let bl = { x: 0, y: 0, score: Infinity };
 
     queue[tail++] = start;
     visited[start] = 1;
@@ -335,6 +595,12 @@ function findBestDocumentComponent(mask, width, height) {
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x);
       maxY = Math.max(maxY, y);
+      const sum = x + y;
+      const diff = x - y;
+      if (sum < tl.score) tl = { x, y, score: sum };
+      if (diff > tr.score) tr = { x, y, score: diff };
+      if (sum > br.score) br = { x, y, score: sum };
+      if (diff < bl.score) bl = { x, y, score: diff };
 
       addNeighbor(index - 1, x > 0);
       addNeighbor(index + 1, x < width - 1);
@@ -352,7 +618,19 @@ function findBestDocumentComponent(mask, width, height) {
     if (area >= minArea && fill > 0.34 && coverage > 0.12 && coverage < 0.92 && touchesManyEdges < 3) {
       const score = area * fill * (1 - Math.abs(0.46 - coverage));
       if (!best || score > best.score) {
-        best = { minX, minY, maxX, maxY, score };
+        best = {
+          minX,
+          minY,
+          maxX,
+          maxY,
+          score,
+          corners: [
+            { x: tl.x, y: tl.y },
+            { x: tr.x, y: tr.y },
+            { x: br.x, y: br.y },
+            { x: bl.x, y: bl.y }
+          ]
+        };
       }
     }
 
@@ -450,6 +728,7 @@ function applyScanFilter(ctx, width, height, mode) {
   const grayscale = mode === "document" || mode === "grayscale";
   const contrast = mode === "document" ? 1.48 : mode === "color" ? 1.18 : 1.22;
   const brightness = mode === "document" ? 10 : mode === "color" ? 4 : 0;
+  const levels = grayscale ? getGrayLevels(data) : null;
 
   for (let i = 0; i < data.length; i += 4) {
     let r = data[i];
@@ -458,9 +737,10 @@ function applyScanFilter(ctx, width, height, mode) {
 
     if (grayscale) {
       const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-      r = gray;
-      g = gray;
-      b = gray;
+      const leveled = normalizeLevel(gray, levels.black, levels.white);
+      r = leveled;
+      g = leveled;
+      b = leveled;
     }
 
     data[i] = clamp((r - 128) * contrast + 128 + brightness);
@@ -469,7 +749,7 @@ function applyScanFilter(ctx, width, height, mode) {
 
     if (mode === "document") {
       const v = data[i];
-      const cleaned = v > 210 ? 255 : v < 48 ? 0 : v;
+      const cleaned = v > 196 ? 255 : v < 88 ? 0 : clamp((v - 128) * 1.22 + 128);
       data[i] = cleaned;
       data[i + 1] = cleaned;
       data[i + 2] = cleaned;
@@ -477,6 +757,41 @@ function applyScanFilter(ctx, width, height, mode) {
   }
 
   ctx.putImageData(imageData, 0, 0);
+}
+
+function getGrayLevels(data) {
+  const histogram = new Uint32Array(256);
+  let count = 0;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = clamp(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+    histogram[gray]++;
+    count++;
+  }
+
+  const black = histogramPercentile(histogram, count, 0.03);
+  const white = histogramPercentile(histogram, count, 0.94);
+  return {
+    black: Math.min(black, 105),
+    white: Math.max(white, 178)
+  };
+}
+
+function histogramPercentile(histogram, count, percentile) {
+  const target = count * percentile;
+  let seen = 0;
+
+  for (let i = 0; i < histogram.length; i++) {
+    seen += histogram[i];
+    if (seen >= target) return i;
+  }
+
+  return histogram.length - 1;
+}
+
+function normalizeLevel(value, black, white) {
+  if (white <= black + 12) return value;
+  return clamp(((value - black) / (white - black)) * 255);
 }
 
 function clamp(value) {
