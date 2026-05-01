@@ -7,13 +7,15 @@ const state = {
   guideFrame: 0,
   guideQuad: null,
   guideLastRun: 0,
-  guideLastSeen: 0
+  guideLastSeen: 0,
+  focusTimer: 0
 };
 
 const els = {
   video: document.querySelector("#cameraPreview"),
   canvas: document.querySelector("#workingCanvas"),
   documentGuide: document.querySelector("#documentGuide"),
+  focusIndicator: document.querySelector("#focusIndicator"),
   empty: document.querySelector("#emptyState"),
   cameraButton: document.querySelector("#cameraButton"),
   snapButton: document.querySelector("#snapButton"),
@@ -38,6 +40,9 @@ const els = {
 };
 
 const MAX_OUTPUT_EDGE = 2200;
+const GUIDE_DETECT_INTERVAL = 190;
+const GUIDE_SAMPLE_EDGE = 420;
+const CAPTURE_SAMPLE_EDGE = 620;
 
 init();
 
@@ -65,6 +70,8 @@ function bindEvents() {
   els.clearButton.addEventListener("click", clearPages);
   els.pageList.addEventListener("click", handlePageAction);
   els.installButton.addEventListener("click", installApp);
+  els.video.addEventListener("pointerdown", handleFocusTap);
+  els.documentGuide.addEventListener("pointerdown", handleFocusTap);
 
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
@@ -91,6 +98,7 @@ async function startCamera() {
     });
     els.video.srcObject = state.stream;
     await els.video.play();
+    await enableContinuousFocus();
     els.video.hidden = false;
     els.empty.hidden = true;
     els.cameraOverlay.hidden = false;
@@ -143,8 +151,13 @@ function stopDocumentGuide() {
   state.guideQuad = null;
   state.guideLastRun = 0;
   state.guideLastSeen = 0;
+  clearTimeout(state.focusTimer);
+  state.focusTimer = 0;
   const ctx = els.documentGuide.getContext("2d");
   ctx.clearRect(0, 0, els.documentGuide.width, els.documentGuide.height);
+  els.documentGuide.classList.remove("is-focusing", "is-focused", "focus-unsupported");
+  els.focusIndicator.hidden = true;
+  els.focusIndicator.classList.remove("is-focusing", "is-focused", "focus-unsupported");
 }
 
 function drawDocumentGuide() {
@@ -162,13 +175,13 @@ function drawDocumentGuide() {
   if (!els.video.videoWidth || !els.video.videoHeight) return;
   const now = performance.now();
 
-  if (now - state.guideLastRun > 420) {
+  if (now - state.guideLastRun > GUIDE_DETECT_INTERVAL) {
     state.guideLastRun = now;
     const frame = document.createElement("canvas");
     frame.width = els.video.videoWidth;
     frame.height = els.video.videoHeight;
     frame.getContext("2d").drawImage(els.video, 0, 0);
-    const quad = detectDocumentQuad(frame);
+    const quad = detectDocumentQuad(frame, GUIDE_SAMPLE_EDGE);
 
     if (quad) {
       state.guideQuad = smoothQuad(state.guideQuad, quad, 0.35);
@@ -245,13 +258,142 @@ function mapVideoPointToDisplay(point, displayWidth, displayHeight) {
   };
 }
 
+async function enableContinuousFocus() {
+  const track = state.stream?.getVideoTracks?.()[0];
+  if (!track?.getCapabilities || !track.applyConstraints) return;
+  const capabilities = track.getCapabilities();
+
+  if (capabilities.focusMode?.includes("continuous")) {
+    await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+  }
+}
+
+async function handleFocusTap(event) {
+  if (!state.stream || els.video.hidden) return;
+  const rect = els.video.getBoundingClientRect();
+  const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+
+  showFocusBox(event.clientX - rect.left, event.clientY - rect.top, rect.width, rect.height, "is-focusing");
+  const focused = await requestCameraFocus(x, y);
+  showFocusBox(event.clientX - rect.left, event.clientY - rect.top, rect.width, rect.height, focused ? "is-focused" : "focus-unsupported");
+}
+
+async function requestCameraFocus(x, y) {
+  const track = state.stream?.getVideoTracks?.()[0];
+  if (!track?.getCapabilities || !track.applyConstraints) return false;
+  const capabilities = track.getCapabilities();
+  const focusConstraints = {};
+
+  if (capabilities.pointsOfInterest) {
+    focusConstraints.pointsOfInterest = [{ x, y }];
+  }
+
+  if (capabilities.focusMode?.includes("single-shot")) {
+    focusConstraints.focusMode = "single-shot";
+  } else if (capabilities.focusMode?.includes("continuous")) {
+    focusConstraints.focusMode = "continuous";
+  }
+
+  if (!Object.keys(focusConstraints).length) return false;
+
+  try {
+    await track.applyConstraints({ advanced: [focusConstraints] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function showFocusBox(x, y, width, height, className) {
+  const boxSize = Math.max(54, Math.min(82, Math.min(width, height) * 0.18));
+  els.focusIndicator.style.setProperty("--focus-x", `${Math.max(0, Math.min(width - boxSize, x - boxSize / 2))}px`);
+  els.focusIndicator.style.setProperty("--focus-y", `${Math.max(0, Math.min(height - boxSize, y - boxSize / 2))}px`);
+  els.focusIndicator.style.setProperty("--focus-size", `${boxSize}px`);
+  els.focusIndicator.hidden = false;
+  els.focusIndicator.classList.remove("is-focusing", "is-focused", "focus-unsupported");
+  els.focusIndicator.classList.add(className);
+
+  clearTimeout(state.focusTimer);
+  state.focusTimer = setTimeout(() => {
+    els.focusIndicator.hidden = true;
+    els.focusIndicator.classList.remove("is-focusing", "is-focused", "focus-unsupported");
+  }, className === "is-focusing" ? 1300 : 850);
+}
+
 async function captureFromCamera() {
   if (!els.video.videoWidth || !els.video.videoHeight) return;
+  els.snapButton.disabled = true;
+  els.dockSnapButton.disabled = true;
+  try {
+    setStatus("Capturing sharp frame...");
+    const source = await captureSharpFrame();
+    await addImageCanvas(source);
+    setStatus("Scan added.");
+  } finally {
+    els.snapButton.disabled = false;
+    els.dockSnapButton.disabled = false;
+  }
+}
+
+async function captureSharpFrame() {
+  let best = null;
+  let bestScore = -1;
+
+  for (let i = 0; i < 4; i++) {
+    if (i > 0) await wait(120);
+    const frame = captureVideoFrame();
+    const score = estimateSharpness(frame);
+    if (score > bestScore) {
+      best = frame;
+      bestScore = score;
+    }
+  }
+
+  return best;
+}
+
+function captureVideoFrame() {
   const source = document.createElement("canvas");
   source.width = els.video.videoWidth;
   source.height = els.video.videoHeight;
   source.getContext("2d").drawImage(els.video, 0, 0);
-  await addImageCanvas(source);
+  return source;
+}
+
+function estimateSharpness(canvas) {
+  const sampleWidth = 180;
+  const sampleHeight = Math.max(1, Math.round(sampleWidth * (canvas.height / canvas.width)));
+  const sample = document.createElement("canvas");
+  sample.width = sampleWidth;
+  sample.height = sampleHeight;
+  const ctx = sample.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(canvas, 0, 0, sampleWidth, sampleHeight);
+  const data = ctx.getImageData(0, 0, sampleWidth, sampleHeight).data;
+  let score = 0;
+
+  for (let y = 1; y < sampleHeight - 1; y++) {
+    for (let x = 1; x < sampleWidth - 1; x++) {
+      const index = (y * sampleWidth + x) * 4;
+      const left = ((y * sampleWidth + x - 1) * 4);
+      const right = ((y * sampleWidth + x + 1) * 4);
+      const up = (((y - 1) * sampleWidth + x) * 4);
+      const down = (((y + 1) * sampleWidth + x) * 4);
+      const center = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+      const neighbors =
+        0.299 * data[left] + 0.587 * data[left + 1] + 0.114 * data[left + 2] +
+        0.299 * data[right] + 0.587 * data[right + 1] + 0.114 * data[right + 2] +
+        0.299 * data[up] + 0.587 * data[up + 1] + 0.114 * data[up + 2] +
+        0.299 * data[down] + 0.587 * data[down + 1] + 0.114 * data[down + 2];
+      score += Math.abs(center * 4 - neighbors);
+    }
+  }
+
+  return score / (sampleWidth * sampleHeight);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function handleCameraInput(event) {
@@ -357,8 +499,7 @@ function processCanvas(source) {
   return { canvas };
 }
 
-function detectDocumentQuad(canvas) {
-  const sampleEdge = 620;
+function detectDocumentQuad(canvas, sampleEdge = CAPTURE_SAMPLE_EDGE) {
   const scale = Math.min(1, sampleEdge / Math.max(canvas.width, canvas.height));
   const sample = document.createElement("canvas");
   sample.width = Math.max(1, Math.round(canvas.width * scale));
