@@ -5,7 +5,9 @@ const state = {
   stream: null,
   deferredInstall: null,
   guideFrame: 0,
-  guideQuad: null
+  guideQuad: null,
+  guideLastRun: 0,
+  guideLastSeen: 0
 };
 
 const els = {
@@ -139,6 +141,8 @@ function stopDocumentGuide() {
   }
   state.guideFrame = 0;
   state.guideQuad = null;
+  state.guideLastRun = 0;
+  state.guideLastSeen = 0;
   const ctx = els.documentGuide.getContext("2d");
   ctx.clearRect(0, 0, els.documentGuide.width, els.documentGuide.height);
 }
@@ -156,23 +160,29 @@ function drawDocumentGuide() {
   ctx.clearRect(0, 0, width, height);
 
   if (!els.video.videoWidth || !els.video.videoHeight) return;
-  if (performance.now() - (drawDocumentGuide.lastRun || 0) < 450) {
-    return;
+  const now = performance.now();
+
+  if (now - state.guideLastRun > 420) {
+    state.guideLastRun = now;
+    const frame = document.createElement("canvas");
+    frame.width = els.video.videoWidth;
+    frame.height = els.video.videoHeight;
+    frame.getContext("2d").drawImage(els.video, 0, 0);
+    const quad = detectDocumentQuad(frame);
+
+    if (quad) {
+      state.guideQuad = smoothQuad(state.guideQuad, quad, 0.35);
+      state.guideLastSeen = now;
+    }
   }
-  drawDocumentGuide.lastRun = performance.now();
 
-  const frame = document.createElement("canvas");
-  frame.width = els.video.videoWidth;
-  frame.height = els.video.videoHeight;
-  frame.getContext("2d").drawImage(els.video, 0, 0);
-  const quad = detectDocumentQuad(frame);
-  state.guideQuad = quad;
-
-  if (!quad) {
+  if (!state.guideQuad || now - state.guideLastSeen > 1600) {
+    state.guideQuad = null;
     drawGuideHint(ctx, width, height);
     return;
   }
 
+  const quad = state.guideQuad;
   const points = quad.map((point) => mapVideoPointToDisplay(point, width, height));
   ctx.lineWidth = Math.max(3, Math.round(4 * devicePixelRatio));
   ctx.strokeStyle = "#22c55e";
@@ -193,6 +203,14 @@ function drawDocumentGuide() {
     ctx.strokeStyle = "#16a34a";
     ctx.stroke();
   }
+}
+
+function smoothQuad(previous, next, amount) {
+  if (!previous) return next;
+  return next.map((point, index) => ({
+    x: previous[index].x + (point.x - previous[index].x) * amount,
+    y: previous[index].y + (point.y - previous[index].y) * amount
+  }));
 }
 
 function drawGuideHint(ctx, width, height) {
@@ -377,7 +395,7 @@ function detectDocumentQuad(canvas) {
 
 function createDocumentMask(luminance, width, height, mean, borderMean) {
   const mask = new Uint8Array(width * height);
-  const lightThreshold = Math.min(238, Math.max(112, mean + 8, borderMean + 18));
+  const lightThreshold = Math.min(238, Math.max(132, mean + 12, borderMean + 24));
 
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
@@ -385,8 +403,8 @@ function createDocumentMask(luminance, width, height, mean, borderMean) {
       const gx = Math.abs(luminance[index + 1] - luminance[index - 1]);
       const gy = Math.abs(luminance[index + width] - luminance[index - width]);
       const contrast = Math.max(gx, gy);
-      const brightPage = luminance[index] > lightThreshold && luminance[index] > borderMean + 14;
-      const flatPage = contrast < 54 && luminance[index] > Math.max(142, mean - 18);
+      const brightPage = luminance[index] > lightThreshold && luminance[index] > borderMean + 20;
+      const flatPage = contrast < 40 && luminance[index] > Math.max(170, mean + 4) && luminance[index] > borderMean + 10;
       if (brightPage || flatPage) mask[index] = 1;
     }
   }
@@ -615,7 +633,7 @@ function findBestDocumentComponent(mask, width, height) {
     const coverage = boxArea / (width * height);
     const touchesManyEdges = Number(minX < 3) + Number(minY < 3) + Number(maxX > width - 4) + Number(maxY > height - 4);
 
-    if (area >= minArea && fill > 0.34 && coverage > 0.12 && coverage < 0.92 && touchesManyEdges < 3) {
+    if (area >= minArea && fill > 0.42 && coverage > 0.12 && coverage < 0.86 && touchesManyEdges < 2) {
       const score = area * fill * (1 - Math.abs(0.46 - coverage));
       if (!best || score > best.score) {
         best = {
@@ -726,8 +744,8 @@ function applyScanFilter(ctx, width, height, mode) {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
   const grayscale = mode === "document" || mode === "grayscale";
-  const contrast = mode === "document" ? 1.48 : mode === "color" ? 1.18 : 1.22;
-  const brightness = mode === "document" ? 10 : mode === "color" ? 4 : 0;
+  const contrast = mode === "document" ? 1.22 : mode === "color" ? 1.12 : 1.12;
+  const brightness = mode === "document" ? 7 : mode === "color" ? 4 : 2;
   const levels = grayscale ? getGrayLevels(data) : null;
 
   for (let i = 0; i < data.length; i += 4) {
@@ -737,7 +755,8 @@ function applyScanFilter(ctx, width, height, mode) {
 
     if (grayscale) {
       const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-      const leveled = normalizeLevel(gray, levels.black, levels.white);
+      const normalized = normalizeLevel(gray, levels.black, levels.white);
+      const leveled = mode === "document" ? gray * 0.32 + normalized * 0.68 : gray * 0.55 + normalized * 0.45;
       r = leveled;
       g = leveled;
       b = leveled;
@@ -749,10 +768,12 @@ function applyScanFilter(ctx, width, height, mode) {
 
     if (mode === "document") {
       const v = data[i];
-      const cleaned = v > 196 ? 255 : v < 88 ? 0 : clamp((v - 128) * 1.22 + 128);
-      data[i] = cleaned;
-      data[i + 1] = cleaned;
-      data[i + 2] = cleaned;
+      const paperLift = v > 174 ? Math.min(248, v + (248 - v) * 0.55) : v;
+      const inkWeight = paperLift < 92 ? Math.max(18, paperLift * 0.78) : paperLift;
+      const scanned = clamp(inkWeight);
+      data[i] = scanned;
+      data[i + 1] = scanned;
+      data[i + 2] = scanned;
     }
   }
 
@@ -769,11 +790,11 @@ function getGrayLevels(data) {
     count++;
   }
 
-  const black = histogramPercentile(histogram, count, 0.03);
-  const white = histogramPercentile(histogram, count, 0.94);
+  const black = histogramPercentile(histogram, count, 0.04);
+  const white = histogramPercentile(histogram, count, 0.9);
   return {
-    black: Math.min(black, 105),
-    white: Math.max(white, 178)
+    black: Math.min(black, 95),
+    white: Math.max(white, 188)
   };
 }
 
@@ -791,7 +812,7 @@ function histogramPercentile(histogram, count, percentile) {
 
 function normalizeLevel(value, black, white) {
   if (white <= black + 12) return value;
-  return clamp(((value - black) / (white - black)) * 255);
+  return clamp(((value - black) / (white - black)) * 236 + 12);
 }
 
 function clamp(value) {
