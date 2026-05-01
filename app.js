@@ -12,8 +12,11 @@ const els = {
   empty: document.querySelector("#emptyState"),
   cameraButton: document.querySelector("#cameraButton"),
   snapButton: document.querySelector("#snapButton"),
+  dockSnapButton: document.querySelector("#dockSnapButton"),
+  dockCloseButton: document.querySelector("#dockCloseButton"),
   stopCameraButton: document.querySelector("#stopCameraButton"),
   cameraOverlay: document.querySelector("#cameraOverlay"),
+  cameraDock: document.querySelector("#cameraDock"),
   cameraInput: document.querySelector("#cameraInput"),
   fileInput: document.querySelector("#fileInput"),
   statusText: document.querySelector("#statusText"),
@@ -45,6 +48,8 @@ function init() {
 function bindEvents() {
   els.cameraButton.addEventListener("click", startCamera);
   els.snapButton.addEventListener("click", captureFromCamera);
+  els.dockSnapButton.addEventListener("click", captureFromCamera);
+  els.dockCloseButton.addEventListener("click", stopCamera);
   els.stopCameraButton.addEventListener("click", stopCamera);
   els.cameraInput.addEventListener("change", handleCameraInput);
   els.fileInput.addEventListener("change", handleFileInput);
@@ -84,6 +89,8 @@ async function startCamera() {
     els.video.hidden = false;
     els.empty.hidden = true;
     els.cameraOverlay.hidden = false;
+    els.cameraDock.hidden = false;
+    els.cameraButton.hidden = true;
     els.stopCameraButton.hidden = false;
   } catch (error) {
     setStatus(cameraErrorMessage(error));
@@ -101,6 +108,8 @@ function stopCamera() {
   els.video.srcObject = null;
   els.video.hidden = true;
   els.cameraOverlay.hidden = true;
+  els.cameraDock.hidden = true;
+  els.cameraButton.hidden = false;
   els.stopCameraButton.hidden = true;
   updatePreviewVisibility();
 }
