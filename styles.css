@@ -70,6 +70,23 @@ button:disabled {
   font-size: 1.2rem;
 }
 
+.app-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.app-version {
+  padding: 3px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .app-header p {
   margin: 2px 0 0;
   color: var(--muted);

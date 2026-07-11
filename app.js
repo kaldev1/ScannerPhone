@@ -53,9 +53,11 @@ const els = {
   clearButton: document.querySelector("#clearButton"),
   retakeLastButton: document.querySelector("#retakeLastButton"),
   finishScanButton: document.querySelector("#finishScanButton"),
+  appVersion: document.querySelector("#appVersion"),
   installButton: document.querySelector("#installButton")
 };
 
+const APP_VERSION = "1.1.0";
 const MAX_SOURCE_EDGE = 4096;
 const MAX_OUTPUT_EDGE = 3200;
 const MAX_PREVIEW_EDGE = 1400;
@@ -70,6 +72,8 @@ const CAPTURE_SAMPLE_EDGE = 1200;
 init();
 
 function init() {
+  els.appVersion.textContent = "v" + APP_VERSION;
+  els.appVersion.title = "ScannerPhone version " + APP_VERSION;
   bindEvents();
   updateTargetPages();
   renderPages();
