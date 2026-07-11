@@ -520,18 +520,30 @@ function wait(ms) {
 async function handleCameraInput(event) {
   const file = event.target.files?.[0];
   if (file?.type.startsWith("image/")) {
-    await addImageFile(file);
+    await addImageFileSafe(file);
   }
   event.target.value = "";
 }
 
 async function handleFileInput(event) {
   const files = Array.from(event.target.files || []);
+  let added = 0;
+  let failed = 0;
+
   for (const file of files) {
     if (file.type.startsWith("image/")) {
-      await addImageFile(file);
+      if (await addImageFileSafe(file, { quiet: true })) {
+        added++;
+      } else {
+        failed++;
+      }
     }
   }
+
+  if (failed) {
+    setStatus(`${added} image${added === 1 ? "" : "s"} added. ${failed} image${failed === 1 ? "" : "s"} could not be read.`);
+  }
+
   event.target.value = "";
 }
 
@@ -638,14 +650,31 @@ function cameraErrorMessage(error) {
 }
 
 async function addImageFile(file) {
-  const image = await loadImage(URL.createObjectURL(file));
-  const source = document.createElement("canvas");
-  const { width, height } = scaledSize(image.naturalWidth, image.naturalHeight, MAX_OUTPUT_EDGE);
-  source.width = width;
-  source.height = height;
-  source.getContext("2d").drawImage(image, 0, 0, width, height);
-  URL.revokeObjectURL(image.src);
-  await addImageCanvas(source, { sharpness: estimateSharpness(source) });
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await loadImage(url);
+    const source = document.createElement("canvas");
+    const { width, height } = scaledSize(image.naturalWidth, image.naturalHeight, MAX_OUTPUT_EDGE);
+    source.width = width;
+    source.height = height;
+    source.getContext("2d").drawImage(image, 0, 0, width, height);
+    await addImageCanvas(source, { sharpness: estimateSharpness(source) });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function addImageFileSafe(file, options = {}) {
+  try {
+    await addImageFile(file);
+    return true;
+  } catch {
+    if (!options.quiet) {
+      setQuality("Import failed", "bad");
+      setStatus("That image could not be read. Try another photo.");
+    }
+    return false;
+  }
 }
 
 async function addImageCanvas(source, capture = {}) {
@@ -805,6 +834,7 @@ function createDocumentMask(luminance, width, height, mean, borderMean) {
 function createAdaptiveDocumentMask(luminance, width, height, mean, borderMean) {
   const mask = new Uint8Array(width * height);
   const radius = Math.max(10, Math.round(Math.min(width, height) * 0.045));
+  const integral = buildIntegralImage(luminance, width, height);
 
   for (let y = 1; y < height - 1; y++) {
     const top = Math.max(0, y - radius);
@@ -813,7 +843,7 @@ function createAdaptiveDocumentMask(luminance, width, height, mean, borderMean) 
       const left = Math.max(0, x - radius);
       const right = Math.min(width - 1, x + radius);
       const index = y * width + x;
-      const local = localMean(luminance, width, left, top, right, bottom);
+      const local = localMean(integral, width, left, top, right, bottom);
       const edge =
         Math.abs(luminance[index + 1] - luminance[index - 1]) +
         Math.abs(luminance[index + width] - luminance[index - width]);
@@ -829,18 +859,36 @@ function createAdaptiveDocumentMask(luminance, width, height, mean, borderMean) 
   return mask;
 }
 
-function localMean(luminance, width, left, top, right, bottom) {
-  let total = 0;
-  let count = 0;
+function buildIntegralImage(luminance, width, height) {
+  const integral = new Float64Array((width + 1) * (height + 1));
 
-  for (let y = top; y <= bottom; y += 4) {
-    for (let x = left; x <= right; x += 4) {
-      total += luminance[y * width + x];
-      count++;
+  for (let y = 0; y < height; y++) {
+    let rowTotal = 0;
+    const sourceOffset = y * width;
+    const integralOffset = (y + 1) * (width + 1);
+    const previousOffset = y * (width + 1);
+
+    for (let x = 0; x < width; x++) {
+      rowTotal += luminance[sourceOffset + x];
+      integral[integralOffset + x + 1] = integral[previousOffset + x + 1] + rowTotal;
     }
   }
 
-  return total / count;
+  return integral;
+}
+
+function localMean(integral, width, left, top, right, bottom) {
+  const stride = width + 1;
+  const x1 = left;
+  const y1 = top;
+  const x2 = right + 1;
+  const y2 = bottom + 1;
+  const total =
+    integral[y2 * stride + x2] -
+    integral[y1 * stride + x2] -
+    integral[y2 * stride + x1] +
+    integral[y1 * stride + x1];
+  return total / ((right - left + 1) * (bottom - top + 1));
 }
 
 function warpDocument(source, quad) {
