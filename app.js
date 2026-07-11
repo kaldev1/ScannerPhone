@@ -56,10 +56,16 @@ const els = {
   installButton: document.querySelector("#installButton")
 };
 
-const MAX_OUTPUT_EDGE = 2200;
+const MAX_SOURCE_EDGE = 4096;
+const MAX_OUTPUT_EDGE = 3200;
+const MAX_PREVIEW_EDGE = 1400;
+const THUMBNAIL_EDGE = 480;
+const ORIGINAL_JPEG_QUALITY = 0.98;
+const OUTPUT_JPEG_QUALITY = 0.97;
+const THUMBNAIL_JPEG_QUALITY = 0.86;
 const GUIDE_DETECT_INTERVAL = 260;
 const GUIDE_SAMPLE_EDGE = 760;
-const CAPTURE_SAMPLE_EDGE = 900;
+const CAPTURE_SAMPLE_EDGE = 1200;
 
 init();
 
@@ -115,8 +121,9 @@ async function startCamera() {
     state.stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 }
+        width: { ideal: 3840 },
+        height: { ideal: 2880 },
+        aspectRatio: { ideal: 4 / 3 }
       },
       audio: false
     });
@@ -306,9 +313,22 @@ async function enableContinuousFocus() {
   const track = state.stream?.getVideoTracks?.()[0];
   if (!track?.getCapabilities || !track.applyConstraints) return;
   const capabilities = track.getCapabilities();
+  const settings = {};
 
   if (capabilities.focusMode?.includes("continuous")) {
-    await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+    settings.focusMode = "continuous";
+  }
+
+  if (capabilities.exposureMode?.includes("continuous")) {
+    settings.exposureMode = "continuous";
+  }
+
+  if (capabilities.whiteBalanceMode?.includes("continuous")) {
+    settings.whiteBalanceMode = "continuous";
+  }
+
+  if (Object.keys(settings).length) {
+    await track.applyConstraints({ advanced: [settings] }).catch(() => {});
   }
 }
 
@@ -458,6 +478,11 @@ function resumeLiveCapture() {
 }
 
 async function captureSharpFrame() {
+  const nativeStill = await captureNativeStillFrame();
+  if (nativeStill) {
+    return { canvas: nativeStill, score: estimateSharpness(nativeStill) };
+  }
+
   let best = null;
   let bestScore = -1;
 
@@ -466,19 +491,88 @@ async function captureSharpFrame() {
     const frame = captureVideoFrame();
     const score = estimateSharpness(frame);
     if (score > bestScore) {
+      releaseCanvas(best);
       best = frame;
       bestScore = score;
+    } else {
+      releaseCanvas(frame);
     }
   }
 
   return { canvas: best, score: bestScore };
 }
 
+async function captureNativeStillFrame() {
+  const track = state.stream?.getVideoTracks?.()[0];
+  if (!track || typeof ImageCapture !== "function") return null;
+
+  try {
+    const capture = new ImageCapture(track);
+    const photoSettings = await getBestPhotoSettings(capture);
+    let blob;
+
+    try {
+      blob = photoSettings ? await capture.takePhoto(photoSettings) : await capture.takePhoto();
+    } catch (error) {
+      if (!photoSettings) throw error;
+      blob = await capture.takePhoto();
+    }
+
+    const url = URL.createObjectURL(blob);
+    try {
+      const image = await loadImage(url);
+      return imageToCanvas(image);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function getBestPhotoSettings(capture) {
+  if (typeof capture.getPhotoCapabilities !== "function") return null;
+
+  try {
+    const capabilities = await capture.getPhotoCapabilities();
+    const maxWidth = capabilities.imageWidth?.max;
+    const maxHeight = capabilities.imageHeight?.max;
+    if (!Number.isFinite(maxWidth) || !Number.isFinite(maxHeight)) return null;
+
+    const scale = Math.min(1, MAX_SOURCE_EDGE / Math.max(maxWidth, maxHeight));
+    return {
+      imageWidth: fitPhotoDimension(maxWidth * scale, capabilities.imageWidth),
+      imageHeight: fitPhotoDimension(maxHeight * scale, capabilities.imageHeight)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function fitPhotoDimension(value, range) {
+  const minimum = Number.isFinite(range.min) ? range.min : 1;
+  const maximum = Number.isFinite(range.max) ? range.max : value;
+  const clamped = Math.max(minimum, Math.min(maximum, value));
+  if (!Number.isFinite(range.step) || range.step <= 0) return Math.round(clamped);
+  const stepped = minimum + Math.round((clamped - minimum) / range.step) * range.step;
+  return Math.round(Math.max(minimum, Math.min(maximum, stepped)));
+}
+
+function releaseCanvas(canvas) {
+  if (!canvas) return;
+  canvas.width = 1;
+  canvas.height = 1;
+}
+
 function captureVideoFrame() {
   const source = document.createElement("canvas");
-  source.width = els.video.videoWidth;
-  source.height = els.video.videoHeight;
-  source.getContext("2d").drawImage(els.video, 0, 0);
+  const size = scaledSize(els.video.videoWidth, els.video.videoHeight, MAX_SOURCE_EDGE);
+  source.width = size.width;
+  source.height = size.height;
+  const ctx = source.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(els.video, 0, 0, size.width, size.height);
   return source;
 }
 
@@ -653,15 +747,25 @@ async function addImageFile(file) {
   const url = URL.createObjectURL(file);
   try {
     const image = await loadImage(url);
-    const source = document.createElement("canvas");
-    const { width, height } = scaledSize(image.naturalWidth, image.naturalHeight, MAX_OUTPUT_EDGE);
-    source.width = width;
-    source.height = height;
-    source.getContext("2d").drawImage(image, 0, 0, width, height);
+    const source = imageToCanvas(image);
     await addImageCanvas(source, { sharpness: estimateSharpness(source) });
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+function imageToCanvas(image) {
+  const source = document.createElement("canvas");
+  const naturalWidth = image.naturalWidth || image.width;
+  const naturalHeight = image.naturalHeight || image.height;
+  const { width, height } = scaledSize(naturalWidth, naturalHeight, MAX_SOURCE_EDGE);
+  source.width = width;
+  source.height = height;
+  const ctx = source.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(image, 0, 0, width, height);
+  return source;
 }
 
 async function addImageFileSafe(file, options = {}) {
@@ -678,13 +782,14 @@ async function addImageFileSafe(file, options = {}) {
 }
 
 async function addImageCanvas(source, capture = {}) {
-  const originalDataUrl = source.toDataURL("image/jpeg", 0.94);
+  const originalDataUrl = source.toDataURL("image/jpeg", ORIGINAL_JPEG_QUALITY);
   const processed = processCanvas(source);
   const quality = assessCaptureQuality(source, processed, capture.sharpness);
   const page = {
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
     originalDataUrl,
-    processedDataUrl: processed.canvas.toDataURL("image/jpeg", 0.95),
+    processedDataUrl: processed.canvas.toDataURL("image/jpeg", OUTPUT_JPEG_QUALITY),
+    thumbnailDataUrl: createThumbnailDataUrl(processed.canvas),
     width: processed.canvas.width,
     height: processed.canvas.height,
     cropMode: processed.cropMode,
@@ -707,7 +812,8 @@ async function reprocessAllPages() {
     source.getContext("2d").drawImage(image, 0, 0);
     const processed = processCanvas(source);
     const quality = assessCaptureQuality(source, processed, estimateSharpness(source));
-    page.processedDataUrl = processed.canvas.toDataURL("image/jpeg", 0.95);
+    page.processedDataUrl = processed.canvas.toDataURL("image/jpeg", OUTPUT_JPEG_QUALITY);
+    page.thumbnailDataUrl = createThumbnailDataUrl(processed.canvas);
     page.width = processed.canvas.width;
     page.height = processed.canvas.height;
     page.cropMode = processed.cropMode;
@@ -716,7 +822,7 @@ async function reprocessAllPages() {
   }
 
   if (state.pages.length) {
-    const image = await loadImage(state.pages[state.pages.length - 1].processedDataUrl);
+    const image = await loadImage(state.pages[state.pages.length - 1].thumbnailDataUrl);
     drawImageToPreview(image);
   }
   renderPages();
@@ -737,7 +843,10 @@ function processCanvas(source) {
     const size = scaledSize(src.width, src.height, MAX_OUTPUT_EDGE);
     canvas.width = size.width;
     canvas.height = size.height;
-    canvas.getContext("2d", { willReadFrequently: true }).drawImage(source, src.x, src.y, src.width, src.height, 0, 0, canvas.width, canvas.height);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(source, src.x, src.y, src.width, src.height, 0, 0, canvas.width, canvas.height);
   }
 
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -901,17 +1010,52 @@ function warpDocument(source, quad) {
   canvas.height = size.height;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   const sourceCtx = source.getContext("2d", { willReadFrequently: true });
-  const sourceData = sourceCtx.getImageData(0, 0, source.width, source.height);
+  const input = sourceCtx.getImageData(0, 0, source.width, source.height).data;
   const output = ctx.createImageData(canvas.width, canvas.height);
+  const target = output.data;
+  const transform = squareToQuad(quad);
+  const uStep = canvas.width > 1 ? 1 / (canvas.width - 1) : 0;
+  const vStep = canvas.height > 1 ? 1 / (canvas.height - 1) : 0;
+  const numeratorXStep = transform.a * uStep;
+  const numeratorYStep = transform.d * uStep;
+  const denominatorStep = transform.g * uStep;
 
   for (let y = 0; y < canvas.height; y++) {
-    const v = canvas.height === 1 ? 0 : y / (canvas.height - 1);
+    const v = y * vStep;
+    let numeratorX = transform.b * v + transform.c;
+    let numeratorY = transform.e * v + transform.f;
+    let denominator = transform.h * v + 1;
+
     for (let x = 0; x < canvas.width; x++) {
-      const u = canvas.width === 1 ? 0 : x / (canvas.width - 1);
-      const top = interpolatePoint(tl, tr, u);
-      const bottom = interpolatePoint(bl, br, u);
-      const src = interpolatePoint(top, bottom, v);
-      sampleBilinear(sourceData, source.width, source.height, src.x, src.y, output.data, (y * canvas.width + x) * 4);
+      const divisor = Math.abs(denominator) < 1e-8 ? 1e-8 : denominator;
+      const sourceX = Math.max(0, Math.min(source.width - 1, numeratorX / divisor));
+      const sourceY = Math.max(0, Math.min(source.height - 1, numeratorY / divisor));
+      const x0 = Math.floor(sourceX);
+      const y0 = Math.floor(sourceY);
+      const x1 = Math.min(source.width - 1, x0 + 1);
+      const y1 = Math.min(source.height - 1, y0 + 1);
+      const tx = sourceX - x0;
+      const ty = sourceY - y0;
+      const topWeight = 1 - ty;
+      const leftWeight = 1 - tx;
+      const topLeft = (y0 * source.width + x0) * 4;
+      const topRight = (y0 * source.width + x1) * 4;
+      const bottomLeft = (y1 * source.width + x0) * 4;
+      const bottomRight = (y1 * source.width + x1) * 4;
+      const targetIndex = (y * canvas.width + x) * 4;
+
+      for (let channel = 0; channel < 3; channel++) {
+        target[targetIndex + channel] =
+          input[topLeft + channel] * leftWeight * topWeight +
+          input[topRight + channel] * tx * topWeight +
+          input[bottomLeft + channel] * leftWeight * ty +
+          input[bottomRight + channel] * tx * ty;
+      }
+      target[targetIndex + 3] = 255;
+
+      numeratorX += numeratorXStep;
+      numeratorY += numeratorYStep;
+      denominator += denominatorStep;
     }
   }
 
@@ -919,31 +1063,32 @@ function warpDocument(source, quad) {
   return canvas;
 }
 
-function interpolatePoint(a, b, amount) {
-  return {
-    x: a.x + (b.x - a.x) * amount,
-    y: a.y + (b.y - a.y) * amount
-  };
-}
+function squareToQuad([tl, tr, br, bl]) {
+  const dx1 = tr.x - br.x;
+  const dx2 = bl.x - br.x;
+  const dx3 = tl.x - tr.x + br.x - bl.x;
+  const dy1 = tr.y - br.y;
+  const dy2 = bl.y - br.y;
+  const dy3 = tl.y - tr.y + br.y - bl.y;
+  const divisor = dx1 * dy2 - dx2 * dy1;
+  let g = 0;
+  let h = 0;
 
-function sampleBilinear(imageData, width, height, x, y, target, targetIndex) {
-  const safeX = Math.max(0, Math.min(width - 1, x));
-  const safeY = Math.max(0, Math.min(height - 1, y));
-  const x0 = Math.floor(safeX);
-  const y0 = Math.floor(safeY);
-  const x1 = Math.min(width - 1, x0 + 1);
-  const y1 = Math.min(height - 1, y0 + 1);
-  const tx = safeX - x0;
-  const ty = safeY - y0;
-  const data = imageData.data;
-
-  for (let channel = 0; channel < 4; channel++) {
-    const a = data[(y0 * width + x0) * 4 + channel];
-    const b = data[(y0 * width + x1) * 4 + channel];
-    const c = data[(y1 * width + x0) * 4 + channel];
-    const d = data[(y1 * width + x1) * 4 + channel];
-    target[targetIndex + channel] = a * (1 - tx) * (1 - ty) + b * tx * (1 - ty) + c * (1 - tx) * ty + d * tx * ty;
+  if ((Math.abs(dx3) > 1e-8 || Math.abs(dy3) > 1e-8) && Math.abs(divisor) > 1e-8) {
+    g = (dx3 * dy2 - dx2 * dy3) / divisor;
+    h = (dx1 * dy3 - dx3 * dy1) / divisor;
   }
+
+  return {
+    a: tr.x - tl.x + g * tr.x,
+    b: bl.x - tl.x + h * bl.x,
+    c: tl.x,
+    d: tr.y - tl.y + g * tr.y,
+    e: bl.y - tl.y + h * bl.y,
+    f: tl.y,
+    g,
+    h
+  };
 }
 
 function distance(a, b) {
@@ -1222,101 +1367,284 @@ function applyScanFilter(ctx, width, height, mode) {
 
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
-  const grayscale = mode === "document" || mode === "grayscale";
-  const contrast = mode === "document" ? 1.32 : mode === "color" ? 1.12 : 1.12;
-  const brightness = mode === "document" ? 0 : mode === "color" ? 4 : 2;
-  const levels = grayscale ? getGrayLevels(data) : null;
-  const illumination = mode === "document" ? estimateIllumination(data, width, height) : null;
 
-  for (let i = 0; i < data.length; i += 4) {
-    let r = data[i];
-    let g = data[i + 1];
-    let b = data[i + 2];
-
-    if (grayscale) {
-      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-      const bg = illumination ? illumination[Math.floor(i / 4)] : 220;
-      const corrected = mode === "document" ? clamp(gray + (212 - bg) * 0.42) : gray;
-      const normalized = normalizeLevel(corrected, levels.black, levels.white);
-      const leveled = mode === "document" ? corrected * 0.62 + normalized * 0.38 : gray * 0.55 + normalized * 0.45;
-      r = leveled;
-      g = leveled;
-      b = leveled;
-    }
-
-    data[i] = clamp((r - 128) * contrast + 128 + brightness);
-    data[i + 1] = clamp((g - 128) * contrast + 128 + brightness);
-    data[i + 2] = clamp((b - 128) * contrast + 128 + brightness);
-
-    if (mode === "document") {
-      const v = data[i];
-      const paperLift = v > 188 ? Math.min(242, v + (242 - v) * 0.2) : v;
-      const midTone = paperLift < 172 ? Math.max(22, paperLift * 0.88) : paperLift;
-      const inkWeight = midTone < 122 ? Math.max(16, midTone * 0.68) : midTone;
-      const scanned = clamp(inkWeight);
-      data[i] = scanned;
-      data[i + 1] = scanned;
-      data[i + 2] = scanned;
-    }
+  if (mode === "document") {
+    applyDocumentFilter(data, width, height);
+  } else if (mode === "color") {
+    applyColorFilter(data, width, height);
+  } else {
+    applyGrayscaleFilter(data);
   }
 
   ctx.putImageData(imageData, 0, 0);
 }
 
-function estimateIllumination(data, width, height) {
-  const sampleStep = Math.max(12, Math.round(Math.min(width, height) / 36));
-  const gridWidth = Math.ceil(width / sampleStep);
-  const gridHeight = Math.ceil(height / sampleStep);
+function applyDocumentFilter(data, width, height) {
+  const luminance = extractLuminance(data);
+  const illumination = estimateIllumination(luminance, width, height);
+  const axes = createGridAxes(width, height, illumination);
+  const corrected = new Uint8ClampedArray(luminance.length);
+  const histogram = new Uint32Array(256);
+
+  for (let y = 0; y < height; y++) {
+    const row0 = axes.y0[y] * illumination.width;
+    const row1 = axes.y1[y] * illumination.width;
+    const yMix = axes.yMix[y];
+    const inverseY = 1 - yMix;
+    const rowOffset = y * width;
+
+    for (let x = 0; x < width; x++) {
+      const inverseX = 1 - axes.xMix[x];
+      const top =
+        illumination.values[row0 + axes.x0[x]] * inverseX +
+        illumination.values[row0 + axes.x1[x]] * axes.xMix[x];
+      const bottom =
+        illumination.values[row1 + axes.x0[x]] * inverseX +
+        illumination.values[row1 + axes.x1[x]] * axes.xMix[x];
+      const background = top * inverseY + bottom * yMix;
+      const correction = clampFloat(242 / Math.max(88, background), 0.9, 1.75);
+      const value = clamp(luminance[rowOffset + x] * (1 + (correction - 1) * 0.9));
+      corrected[rowOffset + x] = value;
+      histogram[value]++;
+    }
+  }
+
+  const black = Math.min(histogramPercentile(histogram, corrected.length, 0.035), 112);
+  const white = Math.max(histogramPercentile(histogram, corrected.length, 0.9), 214);
+  const tones = new Uint8ClampedArray(corrected.length);
+
+  for (let i = 0; i < corrected.length; i++) {
+    const normalized = normalizeDocumentLevel(corrected[i], black, white);
+    let value = corrected[i] * 0.34 + normalized * 0.66;
+
+    if (value > 190) {
+      value += (252 - value) * 0.42;
+    } else if (value < 150) {
+      value -= (150 - value) * 0.08;
+    }
+
+    tones[i] = clamp(value);
+  }
+
+  for (let y = 0; y < height; y++) {
+    const rowOffset = y * width;
+    for (let x = 0; x < width; x++) {
+      const index = rowOffset + x;
+      const center = tones[index];
+      let value = center;
+
+      if (x > 0 && x < width - 1 && y > 0 && y < height - 1) {
+        const edge =
+          center * 4 -
+          tones[index - 1] -
+          tones[index + 1] -
+          tones[index - width] -
+          tones[index + width];
+
+        if (Math.abs(edge) > 4) {
+          value += edge * (center < 215 ? 0.2 : 0.07);
+        }
+      }
+
+      const outputIndex = index * 4;
+      const scanned = clamp(value);
+      data[outputIndex] = scanned;
+      data[outputIndex + 1] = scanned;
+      data[outputIndex + 2] = scanned;
+    }
+  }
+}
+
+function applyColorFilter(data, width, height) {
+  const luminance = extractLuminance(data);
+  const illumination = estimateIllumination(luminance, width, height);
+  const axes = createGridAxes(width, height, illumination);
+  const whitePoint = estimateWhitePoint(data);
+  const neutral = Math.max(210, whitePoint.r, whitePoint.g, whitePoint.b);
+  const redBalance = clampFloat(neutral / Math.max(1, whitePoint.r), 0.88, 1.16);
+  const greenBalance = clampFloat(neutral / Math.max(1, whitePoint.g), 0.88, 1.16);
+  const blueBalance = clampFloat(neutral / Math.max(1, whitePoint.b), 0.88, 1.16);
+
+  for (let y = 0; y < height; y++) {
+    const row0 = axes.y0[y] * illumination.width;
+    const row1 = axes.y1[y] * illumination.width;
+    const yMix = axes.yMix[y];
+    const inverseY = 1 - yMix;
+    const rowOffset = y * width;
+
+    for (let x = 0; x < width; x++) {
+      const inverseX = 1 - axes.xMix[x];
+      const top =
+        illumination.values[row0 + axes.x0[x]] * inverseX +
+        illumination.values[row0 + axes.x1[x]] * axes.xMix[x];
+      const bottom =
+        illumination.values[row1 + axes.x0[x]] * inverseX +
+        illumination.values[row1 + axes.x1[x]] * axes.xMix[x];
+      const background = top * inverseY + bottom * yMix;
+      const correction = clampFloat(238 / Math.max(92, background), 0.88, 1.55);
+      const localGain = 1 + (correction - 1) * 0.78;
+      const index = (rowOffset + x) * 4;
+      const r = data[index] * localGain * redBalance;
+      const g = data[index + 1] * localGain * greenBalance;
+      const b = data[index + 2] * localGain * blueBalance;
+
+      data[index] = clamp((r - 128) * 1.07 + 130);
+      data[index + 1] = clamp((g - 128) * 1.07 + 130);
+      data[index + 2] = clamp((b - 128) * 1.07 + 130);
+    }
+  }
+}
+
+function applyGrayscaleFilter(data) {
+  const levels = getGrayLevels(data);
+
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    const normalized = normalizeLevel(gray, levels.black, levels.white);
+    const value = clamp(((gray * 0.42 + normalized * 0.58) - 128) * 1.1 + 130);
+    data[i] = value;
+    data[i + 1] = value;
+    data[i + 2] = value;
+  }
+}
+
+function extractLuminance(data) {
+  const luminance = new Uint8ClampedArray(data.length / 4);
+
+  for (let i = 0; i < data.length; i += 4) {
+    luminance[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+
+  return luminance;
+}
+
+function estimateIllumination(luminance, width, height) {
+  const cellSize = Math.max(32, Math.round(Math.min(width, height) / 28));
+  const gridWidth = Math.max(1, Math.ceil(width / cellSize));
+  const gridHeight = Math.max(1, Math.ceil(height / cellSize));
   const grid = new Float32Array(gridWidth * gridHeight);
+  const histogram = new Uint32Array(256);
+  const sampleStride = cellSize > 72 ? 3 : 2;
 
   for (let gy = 0; gy < gridHeight; gy++) {
     for (let gx = 0; gx < gridWidth; gx++) {
-      let total = 0;
+      histogram.fill(0);
       let count = 0;
-      const startX = gx * sampleStep;
-      const startY = gy * sampleStep;
-      const endX = Math.min(width, startX + sampleStep);
-      const endY = Math.min(height, startY + sampleStep);
+      const startX = gx * cellSize;
+      const startY = gy * cellSize;
+      const endX = Math.min(width, startX + cellSize);
+      const endY = Math.min(height, startY + cellSize);
 
-      for (let y = startY; y < endY; y += 3) {
-        for (let x = startX; x < endX; x += 3) {
-          const index = (y * width + x) * 4;
-          const gray = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
-          total += gray;
+      for (let y = startY; y < endY; y += sampleStride) {
+        const rowOffset = y * width;
+        for (let x = startX; x < endX; x += sampleStride) {
+          histogram[luminance[rowOffset + x]]++;
           count++;
         }
       }
 
-      grid[gy * gridWidth + gx] = total / count;
+      grid[gy * gridWidth + gx] = histogramPercentile(histogram, count, 0.82);
     }
   }
 
-  const illumination = new Float32Array(width * height);
-  const blurRadius = 2;
-
-  for (let y = 0; y < height; y++) {
-    const gy = Math.min(gridHeight - 1, Math.floor(y / sampleStep));
-    for (let x = 0; x < width; x++) {
-      const gx = Math.min(gridWidth - 1, Math.floor(x / sampleStep));
-      let total = 0;
-      let count = 0;
-
-      for (let dy = -blurRadius; dy <= blurRadius; dy++) {
-        for (let dx = -blurRadius; dx <= blurRadius; dx++) {
-          const sx = Math.max(0, Math.min(gridWidth - 1, gx + dx));
-          const sy = Math.max(0, Math.min(gridHeight - 1, gy + dy));
-          total += grid[sy * gridWidth + sx];
-          count++;
-        }
-      }
-
-      illumination[y * width + x] = total / count;
-    }
-  }
-
-  return illumination;
+  return {
+    values: smoothIlluminationGrid(grid, gridWidth, gridHeight),
+    width: gridWidth,
+    height: gridHeight,
+    cellSize
+  };
 }
 
+function smoothIlluminationGrid(grid, width, height) {
+  let values = grid;
+
+  for (let pass = 0; pass < 2; pass++) {
+    const smoothed = new Float32Array(values.length);
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let total = 0;
+        let weightTotal = 0;
+
+        for (let dy = -1; dy <= 1; dy++) {
+          const sourceY = Math.max(0, Math.min(height - 1, y + dy));
+          const yWeight = dy === 0 ? 2 : 1;
+
+          for (let dx = -1; dx <= 1; dx++) {
+            const sourceX = Math.max(0, Math.min(width - 1, x + dx));
+            const weight = yWeight * (dx === 0 ? 2 : 1);
+            total += values[sourceY * width + sourceX] * weight;
+            weightTotal += weight;
+          }
+        }
+
+        smoothed[y * width + x] = total / weightTotal;
+      }
+    }
+
+    values = smoothed;
+  }
+
+  return values;
+}
+
+function createGridAxes(width, height, grid) {
+  const xAxis = createGridAxis(width, grid.cellSize, grid.width);
+  const yAxis = createGridAxis(height, grid.cellSize, grid.height);
+
+  return {
+    x0: xAxis.low,
+    x1: xAxis.high,
+    xMix: xAxis.mix,
+    y0: yAxis.low,
+    y1: yAxis.high,
+    yMix: yAxis.mix
+  };
+}
+
+function createGridAxis(length, cellSize, gridLength) {
+  const low = new Uint16Array(length);
+  const high = new Uint16Array(length);
+  const mix = new Float32Array(length);
+
+  for (let index = 0; index < length; index++) {
+    const position = Math.max(0, Math.min(gridLength - 1, index / cellSize - 0.5));
+    low[index] = Math.floor(position);
+    high[index] = Math.min(gridLength - 1, low[index] + 1);
+    mix[index] = position - low[index];
+  }
+
+  return { low, high, mix };
+}
+
+function estimateWhitePoint(data) {
+  const red = new Uint32Array(256);
+  const green = new Uint32Array(256);
+  const blue = new Uint32Array(256);
+  let count = 0;
+
+  for (let i = 0; i < data.length; i += 16) {
+    red[data[i]]++;
+    green[data[i + 1]]++;
+    blue[data[i + 2]]++;
+    count++;
+  }
+
+  return {
+    r: histogramPercentile(red, count, 0.9),
+    g: histogramPercentile(green, count, 0.9),
+    b: histogramPercentile(blue, count, 0.9)
+  };
+}
+
+function normalizeDocumentLevel(value, black, white) {
+  if (white <= black + 18) return value;
+  return clamp(((value - black) / (white - black)) * 242 + 8);
+}
+
+function clampFloat(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
 function getGrayLevels(data) {
   const histogram = new Uint32Array(256);
   let count = 0;
@@ -1361,7 +1689,7 @@ function renderPages() {
   state.pages.forEach((page, index) => {
     const node = els.pageTemplate.content.firstElementChild.cloneNode(true);
     const image = node.querySelector("img");
-    image.src = page.processedDataUrl;
+    image.src = page.thumbnailDataUrl || page.processedDataUrl;
     image.alt = `Scanned page ${index + 1}`;
     node.querySelector("span").textContent = `Page ${index + 1}`;
     node.dataset.id = page.id;
@@ -1538,32 +1866,51 @@ function clearPages() {
   renderPages();
 }
 
+function createThumbnailDataUrl(source) {
+  const size = scaledSize(source.width, source.height, THUMBNAIL_EDGE);
+  const thumbnail = document.createElement("canvas");
+  thumbnail.width = size.width;
+  thumbnail.height = size.height;
+  const ctx = thumbnail.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(source, 0, 0, size.width, size.height);
+  return thumbnail.toDataURL("image/jpeg", THUMBNAIL_JPEG_QUALITY);
+}
+
 function drawPreview(canvas) {
-  els.canvas.width = canvas.width;
-  els.canvas.height = canvas.height;
-  els.canvas.getContext("2d").drawImage(canvas, 0, 0);
-  if (state.stream) {
+  const size = scaledSize(canvas.width, canvas.height, MAX_PREVIEW_EDGE);
+  els.canvas.width = size.width;
+  els.canvas.height = size.height;
+  const ctx = els.canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(canvas, 0, 0, size.width, size.height);
+  if (state.stream && !els.captureReviewOverlay.hidden) {
     els.canvas.hidden = true;
-    els.empty.hidden = true;
     return;
   }
-  els.canvas.hidden = false;
+  els.video.hidden = true;
   els.empty.hidden = true;
+  els.canvas.hidden = false;
 }
 
 function drawImageToPreview(image) {
-  els.canvas.width = image.naturalWidth;
-  els.canvas.height = image.naturalHeight;
-  els.canvas.getContext("2d").drawImage(image, 0, 0);
-  if (state.stream) {
+  const size = scaledSize(image.naturalWidth, image.naturalHeight, MAX_PREVIEW_EDGE);
+  els.canvas.width = size.width;
+  els.canvas.height = size.height;
+  const ctx = els.canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(image, 0, 0, size.width, size.height);
+  if (state.stream && !els.captureReviewOverlay.hidden) {
     els.canvas.hidden = true;
-    els.empty.hidden = true;
     return;
   }
-  els.canvas.hidden = false;
+  els.video.hidden = true;
   els.empty.hidden = true;
+  els.canvas.hidden = false;
 }
-
 function updatePreviewVisibility() {
   if (state.stream) return;
   const hasPreview = state.pages.length > 0;
