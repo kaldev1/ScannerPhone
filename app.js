@@ -57,7 +57,7 @@ const els = {
   installButton: document.querySelector("#installButton")
 };
 
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.1.1";
 const MAX_SOURCE_EDGE = 4096;
 const MAX_OUTPUT_EDGE = 3200;
 const MAX_PREVIEW_EDGE = 1400;
@@ -67,7 +67,7 @@ const OUTPUT_JPEG_QUALITY = 0.97;
 const THUMBNAIL_JPEG_QUALITY = 0.86;
 const GUIDE_DETECT_INTERVAL = 260;
 const GUIDE_SAMPLE_EDGE = 760;
-const CAPTURE_SAMPLE_EDGE = 1200;
+const CAPTURE_SAMPLE_EDGE = 900;
 
 init();
 
@@ -1103,7 +1103,7 @@ function isUsableQuad(quad, width, height) {
   const area = polygonArea(quad);
   const coverage = area / (width * height);
   const minSide = Math.min(distance(quad[0], quad[1]), distance(quad[1], quad[2]), distance(quad[2], quad[3]), distance(quad[3], quad[0]));
-  return coverage > 0.08 && coverage < 0.94 && minSide > Math.min(width, height) * 0.18;
+  return coverage > 0.08 && coverage < 0.985 && minSide > Math.min(width, height) * 0.18;
 }
 
 function polygonArea(points) {
@@ -1259,10 +1259,16 @@ function findBestDocumentComponent(mask, width, height) {
     const boxArea = boxWidth * boxHeight;
     const fill = area / boxArea;
     const coverage = boxArea / (width * height);
-    const touchesManyEdges = Number(minX < 3) + Number(minY < 3) + Number(maxX > width - 4) + Number(maxY > height - 4);
+    const edgeMargin = Math.max(4, Math.round(Math.min(width, height) * 0.008));
+    const touchesManyEdges =
+      Number(minX <= edgeMargin) +
+      Number(minY <= edgeMargin) +
+      Number(maxX >= width - 1 - edgeMargin) +
+      Number(maxY >= height - 1 - edgeMargin);
 
-    if (area >= minArea && fill > 0.42 && coverage > 0.12 && coverage < 0.86 && touchesManyEdges < 2) {
-      const score = area * fill * (1 - Math.abs(0.46 - coverage));
+    if (area >= minArea && fill > 0.42 && coverage > 0.12 && coverage < 0.975 && touchesManyEdges < 3) {
+      const coverageWeight = 1 - Math.abs(0.68 - coverage) * 0.55;
+      const score = area * fill * coverageWeight * (1 - touchesManyEdges * 0.08);
       if (!best || score > best.score) {
         best = {
           minX,
@@ -1343,7 +1349,7 @@ function projectionBounds(edge, width, height, axis) {
   while (min < size && counts[min] < threshold) min++;
   while (max > min && counts[max] < threshold) max--;
 
-  if (max - min < size * 0.28 || max - min > size * 0.96) return null;
+  if (max - min < size * 0.28 || max - min > size * 0.985) return null;
   return { min, max };
 }
 
